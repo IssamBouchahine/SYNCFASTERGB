@@ -17,7 +17,53 @@ const WRITE_DELAY_MS: u64 = 200;
 /// thread::sleep은 Windows 타이머 해상도(최대 ~15ms) 문제로 spin-wait 사용.
 const INTER_CHUNK_GAP_US: u64 = 500;
 
+/// High-resolution waitable timer (Windows 10 1803+): waits without burning CPU.
+/// Falls back to the old spin-wait if the timer cannot be created or armed.
+struct GapTimer(windows::Win32::Foundation::HANDLE);
+
+impl GapTimer {
+    fn new() -> Option<Self> {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Threading::CreateWaitableTimerExW;
+        const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION: u32 = 0x0000_0002;
+        const SYNCHRONIZE_AND_TIMER_MODIFY: u32 = 0x0010_0000 | 0x0002;
+        unsafe {
+            CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, SYNCHRONIZE_AND_TIMER_MODIFY)
+                .ok()
+                .map(Self)
+        }
+    }
+
+    fn wait_us(&self, us: u64) -> bool {
+        use windows::Win32::System::Threading::{SetWaitableTimer, WaitForSingleObject};
+        let due: i64 = -((us as i64) * 10); // negative = relative, 100 ns units
+        unsafe {
+            if SetWaitableTimer(self.0, &due, 0, None, None, false).is_err() {
+                return false;
+            }
+            WaitForSingleObject(self.0, 100);
+        }
+        true
+    }
+}
+
+impl Drop for GapTimer {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+thread_local! {
+    static GAP_TIMER: Option<GapTimer> = GapTimer::new();
+}
+
 fn inter_chunk_pause() {
+    let slept = GAP_TIMER.with(|t| t.as_ref().map_or(false, |t| t.wait_us(INTER_CHUNK_GAP_US)));
+    if slept {
+        return;
+    }
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_micros(INTER_CHUNK_GAP_US) {
         std::hint::spin_loop();

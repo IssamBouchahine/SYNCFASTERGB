@@ -50,7 +50,7 @@ fn aspect_grid(width: u32, height: u32) -> (u32, u32) {
 fn capture_grid(data: &[u8], pitch: u32, width: u32, height: u32, cols: u32, rows: u32) -> Vec<Rgb> {
     let cell_w = width / cols;
     let cell_h = height / rows;
-    let step = 4u32.max(cell_w / 8).max(cell_h / 8); // 다운샘플링
+    let step = 1u32.max(cell_w / 8).max(cell_h / 8); // 다운샘플링
 
     let mut grid = Vec::with_capacity((cols * rows) as usize);
 
@@ -195,6 +195,7 @@ pub struct ColorExtractor {
     smoothing: bool,
     smoother: Smoother,
     last_extract: Option<Instant>,
+    last_dims: (u32, u32),
 }
 
 impl ColorExtractor {
@@ -208,6 +209,7 @@ impl ColorExtractor {
             smoothing: sync.smoothing,
             smoother: Smoother::new(sync.attack_ms, sync.decay_ms, sync.deadband),
             last_extract: None,
+            last_dims: (0, 0),
         }
     }
 
@@ -228,6 +230,10 @@ impl ColorExtractor {
 
     /// Extract one color per LED from a BGRA frame.
     pub fn extract(&mut self, data: &[u8], pitch: u32, width: u32, height: u32) -> Vec<(u8, u8, u8)> {
+        if self.last_dims != (width, height) {
+            self.last_dims = (width, height);
+            self.cols = 0;
+        }
         if self.cols == 0 {
             let (c, r) = aspect_grid(width, height);
             self.cols = c;

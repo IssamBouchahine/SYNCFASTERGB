@@ -33,6 +33,10 @@ pub struct CaptureConfig {
     /// Optional case-insensitive substring of "<gpu> <display name>"; overrides `monitor` when set.
     pub monitor_name: String,
     pub sample_width: u32,
+    /// Shrink frames on the GPU before reading them back (falls back to CPU on failure).
+    pub gpu_downscale: bool,
+    /// Windows HDR only: nits that SDR white maps to (Settings > Display > HDR > SDR content brightness).
+    pub hdr_sdr_white_nits: f32,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -225,6 +229,7 @@ impl Config {
         self.capture.fps = self.capture.fps.clamp(10, 60);
         self.capture.sample_width = self.capture.sample_width.clamp(1, 500);
         self.capture.monitor_name.truncate(128);
+        self.capture.hdr_sdr_white_nits = f(self.capture.hdr_sdr_white_nits, 80.0, 1000.0, 240.0);
         let s = &mut self.sync;
         s.speed = s.speed.min(100);
         s.gamma = f(s.gamma, 0.1, 3.0, 1.0);
@@ -305,7 +310,7 @@ impl Default for DeviceConfig {
 
 impl Default for CaptureConfig {
     fn default() -> Self {
-        Self { fps: 30, monitor: 0, monitor_name: String::new(), sample_width: 50 }
+        Self { fps: 30, monitor: 0, monitor_name: String::new(), sample_width: 50, gpu_downscale: true, hdr_sdr_white_nits: 240.0 }
     }
 }
 

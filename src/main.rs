@@ -166,6 +166,15 @@ fn capture_loop(
     let mut black_threshold_frames = config.capture.fps; // ~1초
     // 연속 에러 카운터 (누적 시 DXGI 재초기화)
     let mut consecutive_errors = 0u32;
+    // 마지막 전송 (정지 화면에서 스무딩 수렴 + keepalive)
+    let mut last_sent: Option<Vec<(u8, u8, u8)>> = None;
+    let mut last_send_at = Instant::now();
+    const KEEPALIVE: Duration = Duration::from_millis(500);
+    // 성능 통계 (로컬 로그 전용)
+    let mut stat_cap = Duration::ZERO;
+    let mut stat_ext = Duration::ZERO;
+    let mut stat_frames = 0u32;
+    let mut stat_since = Instant::now();
     // 접근 손실(전체화면 독점 게임·보안 데스크톱)은 1초마다 반복된다 — 시작·복구만 남긴다
     // (2026-10-14 로그: 5시간 동안 19,355회 반복돼 7.5MB)
     let mut access_lost_since: Option<Instant> = None;
@@ -189,15 +198,23 @@ fn capture_loop(
             continue;
         }
 
-        match capturer.capture_frame() {
-            Ok((data, pitch)) => {
+        let t_cap = Instant::now();
+        let cap_result = capturer.capture_frame(frame_interval.as_millis().max(1) as u32);
+        if cap_result.is_ok() {
+            stat_cap += t_cap.elapsed();
+            stat_frames += 1;
+        }
+        match cap_result {
+            Ok(frame) => {
                 consecutive_errors = 0;
                 if let Some(since) = access_lost_since.take() {
                     log::info!("Desktop Duplication 접근 복구 ({}초, 재초기화 {}회)",
                         since.elapsed().as_secs(), access_lost_reinits);
                     access_lost_reinits = 0;
                 }
-                let colors = extractor.extract(&data, pitch, capturer.width, capturer.height);
+                let t_ext = Instant::now();
+                let colors = extractor.extract(&frame.data, frame.pitch, frame.width, frame.height);
+                stat_ext += t_ext.elapsed();
 
                 // 검정 화면 감지: 모든 LED 색상이 거의 검정인지 확인
                 const BLACK_SUM_THRESHOLD: u16 = 15;
@@ -228,9 +245,21 @@ fn capture_loop(
                     black_frame_count = 0;
                 }
 
+                last_sent = Some(colors.clone());
+                last_send_at = Instant::now();
                 let _ = tx.try_send(colors);
             }
-            Err(CaptureError::Timeout) => {}
+            Err(CaptureError::Timeout) => {
+                // Static screen: keep smoothing converging, and send a keepalive.
+                if let Some(f) = capturer.last_frame() {
+                    let colors = extractor.extract(&f.data, f.pitch, f.width, f.height);
+                    if last_sent.as_ref() != Some(&colors) || last_send_at.elapsed() >= KEEPALIVE {
+                        last_sent = Some(colors.clone());
+                        last_send_at = Instant::now();
+                        let _ = tx.try_send(colors);
+                    }
+                }
+            }
             Err(CaptureError::AccessLost) => {
                 if access_lost_since.is_none() {
                     log::warn!("Desktop Duplication 접근 손실 — 복구될 때까지 1초 간격 재초기화");
@@ -256,6 +285,21 @@ fn capture_loop(
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
+        }
+
+        if stat_since.elapsed() >= Duration::from_secs(10) {
+            if stat_frames > 0 {
+                log::info!(
+                    "perf: {} frames/10s, capture {:.2} ms/frame, extract {:.3} ms/frame",
+                    stat_frames,
+                    stat_cap.as_secs_f64() * 1000.0 / stat_frames as f64,
+                    stat_ext.as_secs_f64() * 1000.0 / stat_frames as f64,
+                );
+            }
+            stat_cap = Duration::ZERO;
+            stat_ext = Duration::ZERO;
+            stat_frames = 0;
+            stat_since = Instant::now();
         }
 
         let elapsed = frame_start.elapsed();
