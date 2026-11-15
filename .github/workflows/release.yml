@@ -41,7 +41,10 @@ jobs:
           "$hash  syncfastergb.exe" | Out-File -Encoding ascii SHA256SUMS.txt
           Get-Content SHA256SUMS.txt
 
+      # GitHub only offers build attestations for public repositories (or paid plans), so
+      # private test releases skip this step and public releases always run it.
       - name: Attest build provenance
+        if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: syncfastergb.exe
