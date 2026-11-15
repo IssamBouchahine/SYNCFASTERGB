@@ -40,20 +40,28 @@ to press Win+R and type a command (it opens the vendor's software download page)
 the strip is plugged in. This comes from the firmware, not from this app, and Windows does not
 ask before trusting a new keyboard.
 
-SYNCFASTERGB never opens interface 1, so you can disable it without affecting the lighting.
-In an **administrator** PowerShell:
+SYNCFASTERGB never opens interface 1, so it can be blocked without affecting the lighting.
+Windows refuses to *disable* the keyboard device ("critical system device"), but a device-install
+policy can stop its driver from loading. This edits a machine-wide Windows policy, so read it
+first. In an **administrator** PowerShell:
 
 ```powershell
-# find the strip's keyboard (class Keyboard, "HID Keyboard Device")
-Get-PnpDevice -Class Keyboard -PresentOnly | Where-Object InstanceId -like 'HID\VID_1A86&PID_FE07&MI_01*'
-# disable it (use the InstanceId printed above; the USB\...\MI_01 interface node itself cannot be disabled)
-Disable-PnpDevice -InstanceId 'HID\VID_1A86&PID_FE07&MI_01\<suffix>' -Confirm:$false
-# alternative if the cmdlet refuses
-pnputil /disable-device "HID\VID_1A86&PID_FE07&MI_01\<suffix>"
+$k = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions'
+New-Item -Path "$k\DenyDeviceIDs" -Force | Out-Null
+New-ItemProperty -Path $k -Name DenyDeviceIDs -Value 1 -PropertyType DWord -Force | Out-Null
+New-ItemProperty -Path $k -Name DenyDeviceIDsRetroactive -Value 1 -PropertyType DWord -Force | Out-Null
+New-ItemProperty -Path "$k\DenyDeviceIDs" -Name 1 -Value 'USB\VID_1A86&PID_FE07&MI_01' -PropertyType String -Force | Out-Null
 ```
 
-To undo, run `Enable-PnpDevice` (or `pnputil /enable-device`) with the same id. Other computers you plug the strip into are
-still affected, and you should not plug it into a locked or unattended machine.
+Then unplug and replug the strip (or reboot). `MI_01` is the keyboard interface; the LED interface is
+`MI_00` and is not affected. To undo (only if you had no other device-install policy):
+
+```powershell
+Remove-Item -Recurse 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions'
+```
+
+Other computers you plug the strip into are still affected, and you should not plug it into a
+locked or unattended machine.
 
 ## Known limitations
 
