@@ -53,3 +53,6 @@ jobs:
             syncfastergb.exe
             SHA256SUMS.txt
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          # tags like v0.3.0-rc1 are pre-releases
+          prerelease: ${{ contains(github.ref_name, '-') }}
