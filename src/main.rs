@@ -264,6 +264,8 @@ fn capture_loop(
     ));
     let mut capturer: Option<ScreenCapture> = Some(first);
     let mut local_version = 0u32;
+    // Settings in use: a reload that cannot read the store keeps these
+    let mut in_use = config.clone();
     // Counter of consecutive black frames (the flag is set after about a second)
     let mut black_frame_count = 0u32;
     let mut black_threshold_frames = config.capture.fps; // about 1 second
@@ -302,7 +304,8 @@ fn capture_loop(
         let current_version = config_version.load(Ordering::Relaxed);
         if current_version != local_version {
             local_version = current_version;
-            let c = Config::load_or_default();
+            let c = Config::load_or_keep(&in_use);
+            in_use = c.clone();
             base_interval = Duration::from_millis(1000 / c.capture.fps as u64);
             game_interval = Duration::from_millis(1000 / c.capture.game_fps.max(1) as u64);
             frame_interval = if game_mode {
@@ -734,6 +737,8 @@ fn sender_loop(
     let mut turn_off_on_sleep = config.app.turn_off_on_sleep;
     let mut turn_off_on_black = config.app.turn_off_on_black;
     let mut lamps_amount = config.device.lamps_amount;
+    // Settings in use: a reload that cannot read the store keeps these
+    let mut in_use = config.clone();
 
     let mut conn: Option<DeviceConnection> = None;
     let mut link = LinkState::Absent;
@@ -835,7 +840,8 @@ fn sender_loop(
         let cv = config_version.load(Ordering::Relaxed);
         if cv != local_version {
             local_version = cv;
-            let c = Config::load_or_default();
+            let c = Config::load_or_keep(&in_use);
+            in_use = c.clone();
             wire_map = WireMap::from_str(&c.device.wire_map);
             send_interval = Duration::from_millis(c.sync.interval_ms());
             grade_params = grade_from_config(&c.sync);

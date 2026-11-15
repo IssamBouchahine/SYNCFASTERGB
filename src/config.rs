@@ -246,6 +246,15 @@ impl SyncConfig {
     }
 }
 
+/// What the settings store holds right now.
+enum Stored {
+    /// Nothing saved yet (or everything was removed).
+    Missing,
+    Valid(Config),
+    /// Settings exist but could not be read or parsed, even after retrying.
+    Unreadable(String),
+}
+
 impl Config {
     /// Stored settings text larger than this is rejected.
     pub const MAX_SETTINGS_BYTES: usize = 64 * 1024;
@@ -304,20 +313,67 @@ impl Config {
         Self::load_from_key(STORE_KEY).unwrap_or_default()
     }
 
+    /// Reload for a running program: the stored settings, or the defaults when nothing is stored
+    /// (the user removed them), but the settings already in use when stored ones exist and
+    /// cannot be read right now. A failed read must never reset a running strip to factory values.
+    pub fn load_or_keep(current: &Config) -> Config {
+        Self::load_or_keep_from(STORE_KEY, current)
+    }
+
+    fn load_or_keep_from(key_path: &str, current: &Config) -> Config {
+        match Self::read_stored(key_path) {
+            Stored::Missing => Config::default(),
+            Stored::Valid(c) => c,
+            Stored::Unreadable(e) => {
+                log::error!("stored settings unreadable ({e}): keeping the current settings");
+                current.clone()
+            }
+        }
+    }
+
     pub fn load_from_key(key_path: &str) -> Option<Self> {
-        use winreg::enums::HKEY_CURRENT_USER;
-        use winreg::RegKey;
-        let key = RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey(key_path)
-            .ok()?;
-        let text: String = key.get_value(VALUE_SETTINGS).ok()?;
-        match Self::from_toml(&text) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                log::warn!("stored settings unreadable ({e}): using defaults");
+        match Self::read_stored(key_path) {
+            Stored::Valid(c) => Some(c),
+            Stored::Missing => None,
+            Stored::Unreadable(e) => {
+                log::error!("stored settings unreadable ({e}): using defaults");
                 None
             }
         }
+    }
+
+    /// One look at the store, retried a few times when settings exist but cannot be read or
+    /// parsed (another process may be in the middle of writing them).
+    fn read_stored(key_path: &str) -> Stored {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+        let mut last_error = String::new();
+        for attempt in 0..4 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(75));
+            }
+            let key = match RegKey::predef(HKEY_CURRENT_USER).open_subkey(key_path) {
+                Ok(k) => k,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Stored::Missing,
+                Err(e) => {
+                    last_error = format!("cannot open the settings key: {e}");
+                    continue;
+                }
+            };
+            let text: String = match key.get_value(VALUE_SETTINGS) {
+                Ok(t) => t,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Stored::Missing,
+                Err(e) => {
+                    last_error = format!("cannot read the settings value: {e}");
+                    continue;
+                }
+            };
+            match Self::from_toml(&text) {
+                Ok(c) => return Stored::Valid(c),
+                Err(e) => last_error = e.to_string(),
+            }
+        }
+        Stored::Unreadable(last_error)
     }
 
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -380,8 +436,10 @@ impl Default for DeviceConfig {
         Self {
             com_port: "auto".into(),
             wire_map: "RGB".into(),
-            display_size: 27,
-            lamps_amount: 65,
+            // the 34" kit this program is built for: 71 LEDs, so even a fallback to defaults
+            // lights the whole strip
+            display_size: 34,
+            lamps_amount: 71,
         }
     }
 }
@@ -494,7 +552,7 @@ mod tests {
     #[test]
     fn empty_config_uses_defaults() {
         let c: Config = toml::from_str("").unwrap();
-        assert_eq!(c.device.lamps_amount, 65);
+        assert_eq!(c.device.lamps_amount, 71);
         assert_eq!(c.capture.fps, 60);
         assert_eq!(c.capture.game_fps, 30);
         assert!(c.sync.detect_auto, "automatic detection is on by default");
@@ -589,6 +647,41 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_reload_keeps_the_running_settings_instead_of_resetting_them() {
+        use winreg::enums::HKEY_CURRENT_USER;
+        let hk = winreg::RegKey::predef(HKEY_CURRENT_USER);
+        let key = r"Software\SYNCFASTERGB_Test_keep";
+        let _ = hk.delete_subkey_all(key);
+
+        let mut running = Config::default();
+        running.device.lamps_amount = 99;
+        running.sync.brightness = 77;
+
+        // nothing stored (the user removed everything): defaults are right
+        assert_eq!(
+            Config::load_or_keep_from(key, &running).device.lamps_amount,
+            71
+        );
+
+        // stored but unreadable: the settings in use stay
+        let (k, _) = hk.create_subkey(key).unwrap();
+        k.set_value("Settings", &"this is [not valid toml".to_string())
+            .unwrap();
+        let kept = Config::load_or_keep_from(key, &running);
+        assert_eq!((kept.device.lamps_amount, kept.sync.brightness), (99, 77));
+
+        // stored and valid: the stored settings win
+        let mut stored = Config::default();
+        stored.device.lamps_amount = 80;
+        k.set_value("Settings", &stored.to_toml().unwrap()).unwrap();
+        assert_eq!(
+            Config::load_or_keep_from(key, &running).device.lamps_amount,
+            80
+        );
+        let _ = hk.delete_subkey_all(key);
+    }
+
+    #[test]
     fn partial_config_is_accepted() {
         let c: Config = toml::from_str(
             "[device]
@@ -598,7 +691,7 @@ monitor_name = \"dp\"",
         )
         .unwrap();
         assert_eq!(c.device.lamps_amount, 71);
-        assert_eq!(c.device.display_size, 27);
+        assert_eq!(c.device.display_size, 34);
         assert_eq!(c.capture.monitor_name, "dp");
         assert_eq!(c.capture.sample_width, 50);
     }
