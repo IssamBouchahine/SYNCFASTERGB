@@ -501,7 +501,9 @@ fn capture_loop(
             Err(CaptureError::Timeout) => {
                 dead_since = None; // a timeout just means the screen is static
                                    // Static screen: keep smoothing converging, and send a keepalive.
-                if let Some(f) = cap.last_frame() {
+                                   // The newest change may still be waiting in the GPU readback: take it now.
+                let fresh = cap.flush_pending();
+                if let Some(f) = fresh.as_ref().or_else(|| cap.last_frame()) {
                     let colors = extractor.extract(&f.data, f.pitch, f.width, f.height);
                     if last_sent.as_ref() != Some(&colors) || last_send_at.elapsed() >= KEEPALIVE {
                         last_sent = Some(colors.clone());

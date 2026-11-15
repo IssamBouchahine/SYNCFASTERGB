@@ -167,6 +167,53 @@ impl ScreenCapture {
         self.cache.as_ref()
     }
 
+    /// The newest change that has not been read back yet, if any.
+    ///
+    /// Every new frame returns the PREVIOUS frame's copy (so the CPU never waits for a busy GPU).
+    /// When the screen then goes still no further frame arrives, and the copy of the very last
+    /// change would sit unread until something else moved: a white page changing to red showed
+    /// white on the strip for seconds. Call this when a frame wait times out.
+    pub fn flush_pending(&mut self) -> Option<Frame> {
+        let gpu = self.gpu.as_mut()?;
+        if !gpu.pending {
+            return None;
+        }
+        let idx = gpu.write_idx ^ 1; // the copy queued by the most recent frame
+                                     // SAFETY: the staging texture and context belong to this capture and are only used from
+                                     // this thread; `wait == false` never blocks on the GPU.
+        let got = unsafe {
+            if gpu.hdr {
+                read_back_hdr(
+                    &self.context,
+                    &gpu.staging[idx],
+                    gpu.small_w,
+                    gpu.small_h,
+                    self.sdr_white_scale,
+                    false,
+                )
+            } else {
+                read_back(
+                    &self.context,
+                    &gpu.staging[idx],
+                    gpu.small_w,
+                    gpu.small_h,
+                    false,
+                )
+            }
+        };
+        match got {
+            Ok(Some(f)) => {
+                // consumed: the next real frame starts a fresh pipeline (reads its own copy)
+                gpu.pending = false;
+                gpu.stall = 0;
+                self.cache = Some(f.clone());
+                Some(f)
+            }
+            // not ready yet (or an error): the next timeout tries again
+            _ => None,
+        }
+    }
+
     /// Wait up to `timeout_ms` for a new frame.
     pub fn capture_frame(&mut self, timeout_ms: u32) -> Result<Frame, CaptureError> {
         unsafe {

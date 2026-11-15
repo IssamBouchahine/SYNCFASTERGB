@@ -18,6 +18,20 @@ fn luma(c: [f32; 3]) -> f32 {
     0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
 }
 
+/// How much the colour (not the brightness) differs between two LED values: 0 = same hue,
+/// 1 = clearly a different colour. Near-black values have no meaningful hue and count as 0.
+fn hue_change(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let top = |c: [f32; 3]| c[0].max(c[1]).max(c[2]);
+    let (ma, mb) = (top(a), top(b));
+    if ma < 16.0 || mb < 16.0 {
+        return 0.0;
+    }
+    let d = (0..3)
+        .map(|k| (a[k] / ma - b[k] / mb).abs())
+        .fold(0.0, f32::max);
+    (d / 0.35).clamp(0.0, 1.0)
+}
+
 impl Smoother {
     pub fn new(attack_ms: f32, decay_ms: f32, deadband: f32) -> Self {
         Self {
@@ -76,7 +90,10 @@ impl Smoother {
             let tau = if luma(t) >= luma(self.state[i]) {
                 self.attack_ms
             } else {
-                self.decay_ms
+                // Getting darker eases slowly, but a change of colour (white turning red also
+                // "gets darker") follows at the fast speed, so the old hue does not linger.
+                let m = hue_change(t, self.state[i]);
+                self.decay_ms + (self.attack_ms - self.decay_ms) * m
             };
             // alpha is shared by all channels of one LED so hue does not drift.
             let alpha = if tau <= 0.0 {
@@ -173,6 +190,33 @@ fn purify(c: [u8; 3]) -> [u8; 3] {
         }
     }
     out
+}
+
+/// Faint stray channels beside a clearly dominant one are removed.
+///
+/// The strip's green and blue LEDs are far more efficient than its red one, so a few units of
+/// blue beside a dimmer red (for example 180, 0, 6) already read as pink to the eye. A channel
+/// below `LOW` of the strongest one is dropped, it fades back in up to `HIGH`, and everything
+/// stronger than that (orange, pink, purple, skin tones, whites) is left exactly as it was.
+fn suppress_stray(c: [u8; 3]) -> [u8; 3] {
+    const LOW: f32 = 0.08;
+    const HIGH: f32 = 0.30;
+    let m = c[0].max(c[1]).max(c[2]);
+    if m == 0 {
+        return c;
+    }
+    let keep = |v: u8| -> u8 {
+        let r = v as f32 / m as f32;
+        let t = ((r - LOW) / (HIGH - LOW)).clamp(0.0, 1.0);
+        let w = t * t * (3.0 - 2.0 * t); // smoothstep
+        (v as f32 * w).round() as u8
+    };
+    // the strongest channel itself always stays
+    [
+        if c[0] == m { m } else { keep(c[0]) },
+        if c[1] == m { m } else { keep(c[1]) },
+        if c[2] == m { m } else { keep(c[2]) },
+    ]
 }
 
 fn saturate(c: [u8; 3], gain: f32) -> [u8; 3] {
@@ -298,6 +342,7 @@ pub fn grade(c: [u8; 3], g: &Grade) -> [u8; 3] {
         c = purify(c);
     }
     c = saturate(c, g.saturation_gain);
+    c = suppress_stray(c);
     c = apply_gamma(c, g.gamma);
     scale(c, g.brightness)
 }
@@ -543,8 +588,103 @@ mod tests {
     }
 
     #[test]
+    fn a_colour_change_does_not_linger_in_the_old_hue() {
+        // white turning red: brightness falls, but the colour must follow quickly
+        let mut s = Smoother::new(40.0, 250.0, 0.0);
+        s.cut_threshold = 1.0e9; // no scene-cut snap: test the filter itself
+        s.update(&[[200, 200, 200]], 16.0);
+        let mut out = [200u8; 3];
+        for _ in 0..5 {
+            out = s.update(&[[200, 0, 0]], 16.0)[0]; // 80 ms
+        }
+        assert!(
+            out[1] < 60 && out[2] < 60,
+            "green/blue still lingering: {out:?}"
+        );
+        assert!(out[0] >= 190);
+    }
+
+    #[test]
+    fn plain_dimming_still_fades_slowly() {
+        let mut s = Smoother::new(40.0, 250.0, 0.0);
+        s.cut_threshold = 1.0e9;
+        s.update(&[[200, 200, 200]], 16.0);
+        let mut out = [200u8; 3];
+        for _ in 0..5 {
+            out = s.update(&[[100, 100, 100]], 16.0)[0]; // 80 ms
+        }
+        assert!(out[0] > 160, "dimming must stay gentle: {out:?}");
+    }
+
+    #[test]
+    fn hue_change_is_zero_for_the_same_hue_and_ignores_near_black() {
+        assert_eq!(hue_change([200.0, 100.0, 50.0], [100.0, 50.0, 25.0]), 0.0);
+        assert_eq!(hue_change([5.0, 0.0, 0.0], [0.0, 0.0, 5.0]), 0.0);
+        assert_eq!(hue_change([255.0, 255.0, 255.0], [255.0, 0.0, 0.0]), 1.0);
+        let m = hue_change([200.0, 200.0, 200.0], [200.0, 170.0, 200.0]);
+        assert!(m > 0.0 && m < 1.0);
+    }
+
+    #[test]
     fn purify_makes_clean_primary() {
         assert_eq!(purify([210, 30, 20]), [255, 0, 0]);
         assert_eq!(purify([100, 100, 100]), [100, 100, 100]);
+    }
+
+    #[test]
+    fn stray_blue_beside_a_dimmer_red_is_removed() {
+        // the observed case: a dark red sent as 180, 0, 6 looked pink on the strip
+        assert_eq!(suppress_stray([180, 0, 6]), [180, 0, 0]);
+        assert_eq!(suppress_stray([120, 5, 10]), [120, 0, 0]);
+        assert_eq!(suppress_stray([60, 2, 4]), [60, 0, 0]);
+        // the same for the other primaries
+        assert_eq!(suppress_stray([4, 150, 8]), [0, 150, 0]);
+        assert_eq!(suppress_stray([3, 5, 200]), [0, 0, 200]);
+    }
+
+    #[test]
+    fn real_colors_are_left_exactly_as_they_were() {
+        for c in [
+            [255, 0, 0],
+            [0, 0, 0],
+            [255, 255, 255],
+            [100, 100, 100],
+            [255, 140, 0],   // orange
+            [255, 120, 160], // pink stays pink
+            [200, 0, 120],   // magenta
+            [230, 180, 150], // skin
+            [0, 200, 200],   // cyan
+            [200, 200, 0],   // yellow
+            [90, 40, 30],    // brown
+        ] {
+            assert_eq!(suppress_stray(c), c, "{c:?}");
+        }
+    }
+
+    #[test]
+    fn stray_removal_fades_in_gradually_and_never_touches_the_strongest_channel() {
+        let mut prev = 0;
+        for b in 0..=100u8 {
+            let out = suppress_stray([200, 0, b]);
+            assert_eq!(out[0], 200);
+            assert!(out[2] >= prev, "monotonic in the weak channel");
+            assert!(out[2] <= b);
+            prev = out[2];
+        }
+        // fully gone below 8% of the strongest channel, fully kept from 30%
+        assert_eq!(suppress_stray([200, 0, 16])[2], 0);
+        assert_eq!(suppress_stray([200, 0, 60])[2], 60);
+        // ties keep both strongest channels
+        assert_eq!(suppress_stray([200, 200, 3]), [200, 200, 0]);
+    }
+
+    #[test]
+    fn deep_red_goes_through_the_whole_grade_as_clean_red() {
+        let g = Grade::default();
+        // screen (170, 10, 15), as seen in testing
+        let out = grade([170, 10, 15], &g);
+        assert_eq!((out[1], out[2]), (0, 0), "{out:?}");
+        assert!(out[0] >= 170);
+        assert_eq!(grade([255, 0, 0], &g), [255, 0, 0]);
     }
 }
