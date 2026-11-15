@@ -80,8 +80,8 @@ Designed to be gentle on the laptop and the strip:
   full-screen app is focused (detected with Windows' own full-screen detector, so merely maximized
   windows do not count), and never restarts or retries aggressively while a game owns the screen.
   Measured on an RTX 4060 laptop with a synthetic load keeping the GPU 100% busy while the screen
-  changed at 60 Hz: about 1.4% less GPU throughput at 60 fps capture (roughly half that at 30 fps) and
-  about 4% of one CPU core. A game that is not completely GPU-bound sees no difference.
+  changed at 60 Hz: about 1.2% less GPU throughput at 60 fps capture (roughly half that at 30 fps) and
+  about 4-6% of one CPU core. A game that is not completely GPU-bound sees no difference.
 - **No admin rights, no network, no drivers.**
 
 ## Security stance

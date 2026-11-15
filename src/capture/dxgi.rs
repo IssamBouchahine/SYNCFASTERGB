@@ -59,6 +59,8 @@ struct GpuDownscale {
     write_idx: usize,
     /// A copy is in flight in `staging[write_idx ^ 1]`.
     pending: bool,
+    /// Consecutive frames whose previous readback was still not ready.
+    stall: u32,
     /// Desktop is FP16 scRGB (Windows HDR): read back floats and tone-map to SDR.
     hdr: bool,
 }
@@ -227,9 +229,18 @@ impl ScreenCapture {
             let submitted = gpu.write_idx;
             ctx.CopySubresourceRegion(&gpu.staging[submitted], 0, 0, 0, 0, &gpu.mip_tex, gpu.level, None);
             gpu.write_idx ^= 1;
+            // Commands are batched until flushed: without this the copy may sit in the queue
+            // and the "is it ready?" check below would never succeed.
+            ctx.Flush();
             // ... and read the PREVIOUS frame's copy without waiting for the GPU. The very first
-            // frame has no previous one, so it waits once.
-            let (read_idx, wait) = if gpu.pending { (submitted ^ 1, false) } else { (submitted, true) };
+            // frame has no previous one, so it waits once. If the previous copy has been "not
+            // ready" for several frames in a row, wait for it once rather than ever go stale.
+            const MAX_STALL: u32 = 8;
+            let (read_idx, wait) = if gpu.pending {
+                (submitted ^ 1, gpu.stall >= MAX_STALL)
+            } else {
+                (submitted, true)
+            };
             gpu.pending = true;
             let got = if gpu.hdr {
                 read_back_hdr(ctx, &gpu.staging[read_idx], gpu.small_w, gpu.small_h, self.sdr_white_scale, wait)?
@@ -237,12 +248,18 @@ impl ScreenCapture {
                 read_back(ctx, &gpu.staging[read_idx], gpu.small_w, gpu.small_h, wait)?
             };
             match got {
-                Some(f) => f,
+                Some(f) => {
+                    gpu.stall = 0;
+                    f
+                }
                 // GPU still busy (a game has it): reuse the last frame instead of stalling.
-                None => match &self.cache {
-                    Some(c) => return Ok(c.clone()),
-                    None => return Err(CaptureError::Other("first readback not ready".into())),
-                },
+                None => {
+                    gpu.stall += 1;
+                    match &self.cache {
+                        Some(c) => return Ok(c.clone()),
+                        None => return Err(CaptureError::Other("first readback not ready".into())),
+                    }
+                }
             }
         } else {
             if hdr {
@@ -402,7 +419,7 @@ unsafe fn create_gpu_downscale(
         create_staging(device, small_w, small_h, stage_fmt)?,
     ];
 
-    Ok(GpuDownscale { mip_tex, srv, level, small_w, small_h, staging, write_idx: 0, pending: false, hdr })
+    Ok(GpuDownscale { mip_tex, srv, level, small_w, small_h, staging, write_idx: 0, pending: false, stall: 0, hdr })
 }
 
 unsafe fn create_staging(
