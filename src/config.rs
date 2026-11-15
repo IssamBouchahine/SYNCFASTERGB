@@ -351,7 +351,7 @@ pub fn set_autostart(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(approved_key) = hkcu.open_subkey_with_flags(REG_APPROVED_KEY, KEY_WRITE) {
             let enabled = winreg::RegValue {
                 vtype: RegType::REG_BINARY,
-                bytes: vec![0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                bytes: vec![0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0].into(),
             };
             approved_key.set_raw_value(REG_VALUE_NAME, &enabled).ok();
         }
