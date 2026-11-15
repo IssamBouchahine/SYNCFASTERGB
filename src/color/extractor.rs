@@ -146,6 +146,86 @@ fn detect_bars(f: &Frame, black_level: u8) -> (usize, usize, usize, usize) {
     (top, bottom, left, right)
 }
 
+// ───────────────────────── automatic mode ─────────────────────────
+
+/// A bar is never brighter than this (average line brightness), so a mid-grey border or a
+/// bright page is picture, not a bar.
+const BAR_MAX_LUMA: u32 = 40;
+/// Lines of one bar may differ by at most this much (noise, slight gradient).
+const BAR_UNIFORMITY: u32 = 14;
+/// The picture must be at least this much brighter than the bar, on two lines in a row.
+const BAR_STEP: u32 = 10;
+
+/// Thickness of the bar on one side, found by its sharp edge instead of a brightness threshold:
+/// a run of uniformly dark lines followed by an abrupt step up. Gradual fades are not bars.
+fn bar_extent_edge(n: usize, cap: usize, luma: &dyn Fn(usize) -> u32) -> usize {
+    let m = (cap + 2).min(n);
+    if m < MIN_BAR + 2 {
+        return 0;
+    }
+    let l: Vec<u32> = (0..m).map(luma).collect();
+    for k in MIN_BAR..=cap.min(m - 2) {
+        let run = &l[..k];
+        let mean = run.iter().sum::<u32>() / k as u32;
+        let (lo, hi) = (*run.iter().min().unwrap_or(&0), *run.iter().max().unwrap_or(&0));
+        if mean > BAR_MAX_LUMA || hi - lo > BAR_UNIFORMITY {
+            return 0; // the dark run stopped being uniform before any sharp edge: no bar
+        }
+        if l[k] >= mean + BAR_STEP && l[k + 1] >= mean + BAR_STEP {
+            return k;
+        }
+    }
+    0
+}
+
+/// Bars on all four sides by edge detection, with the same both-sides rule as the manual mode.
+fn detect_bars_edge(f: &Frame) -> (usize, usize, usize, usize) {
+    let cap_y = f.h * MAX_BAR_PCT / 100;
+    let cap_x = f.w * MAX_BAR_PCT / 100;
+    let top = bar_extent_edge(f.h, cap_y, &|i| f.row_luma(i));
+    let bottom = bar_extent_edge(f.h, cap_y, &|i| f.row_luma(f.h - 1 - i));
+    let left = bar_extent_edge(f.w, cap_x, &|i| f.col_luma(i));
+    let right = bar_extent_edge(f.w, cap_x, &|i| f.col_luma(f.w - 1 - i));
+    let pair = |a: usize, b: usize| if a >= MIN_BAR && b >= MIN_BAR { (a.min(b), a.min(b)) } else { (0, 0) };
+    let (top, bottom) = pair(top, bottom);
+    let (left, right) = pair(left, right);
+    (top, bottom, left, right)
+}
+
+/// How busy the picture edge is: mean absolute difference between neighbouring strip segments
+/// (0 = perfectly smooth, large for game HUDs, text and web pages).
+fn edge_busyness(s: &EdgeSamples) -> f32 {
+    let strip = |v: &Vec<[u8; 3]>| -> (f32, usize) {
+        let d: f32 = v
+            .windows(2)
+            .map(|w| ((w[0][0] as f32 - w[1][0] as f32).abs() + (w[0][1] as f32 - w[1][1] as f32).abs() + (w[0][2] as f32 - w[1][2] as f32).abs()) / 3.0)
+            .sum();
+        (d, v.len().saturating_sub(1))
+    };
+    let (mut sum, mut n) = (0.0, 0usize);
+    for v in [&s.top, &s.bottom, &s.left, &s.right] {
+        let (d, c) = strip(v);
+        sum += d;
+        n += c;
+    }
+    if n == 0 { 0.0 } else { sum / n as f32 }
+}
+
+/// Automatic depth in percent: shallow and precise for smooth video, deeper and steadier for
+/// busy edges. Always between 10% and 20%.
+pub fn auto_depth_target(busyness: f32) -> f32 {
+    if !busyness.is_finite() {
+        return 10.0;
+    }
+    10.0 + 10.0 * ((busyness - 6.0) / 30.0).clamp(0.0, 1.0)
+}
+
+/// Move the automatic depth toward its target with a 1.5 s time constant, so it never jumps.
+fn smooth_depth(cur: f32, target: f32, dt_ms: f32) -> f32 {
+    let dt = dt_ms.clamp(0.0, 500.0);
+    cur + (target - cur) * (1.0 - (-dt / 1500.0).exp())
+}
+
 /// Where the sampled strips are, in frame pixels. Used by the sampler AND by the settings
 /// window's illustration, so what is drawn is exactly what is sampled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -279,12 +359,20 @@ pub struct ColorExtractor {
     last_dims: (u32, u32),
     /// Black-bar thickness in use, stabilised over time so detection never flickers.
     bars: (usize, usize, usize, usize),
+    /// Automatic mode: the engine judges bars and depth itself, in real time.
+    auto: bool,
+    auto_depth: f32,
 }
 
 impl ColorExtractor {
     /// Black bars currently being skipped (top, bottom, left, right), in frame lines.
     pub fn bars(&self) -> (usize, usize, usize, usize) {
         self.bars
+    }
+
+    /// Depth in percent currently in use (automatic or manual).
+    pub fn effective_depth(&self) -> u8 {
+        if self.auto { self.auto_depth.round().clamp(3.0, 40.0) as u8 } else { self.params.depth_pct }
     }
 }
 
@@ -298,6 +386,8 @@ impl ColorExtractor {
             last_extract: None,
             last_dims: (0, 0),
             bars: (0, 0, 0, 0),
+            auto: sync.detect_auto,
+            auto_depth: 12.0,
         }
     }
 
@@ -308,6 +398,7 @@ impl ColorExtractor {
             self.smoother.reset();
         }
         self.params = EdgeParams::from_sync(sync);
+        self.auto = sync.detect_auto;
         self.smoothing = sync.smoothing;
         self.smoother.attack_ms = sync.attack_ms;
         self.smoother.decay_ms = sync.decay_ms;
@@ -324,23 +415,35 @@ impl ColorExtractor {
         }
         let frame = Frame { data, pitch: pitch as usize, w: width as usize, h: height as usize };
 
-        if self.params.skip_black_bars {
-            let seen = detect_bars(&frame, self.params.black_level);
-            self.bars = stabilise(self.bars, seen);
-        } else {
-            self.bars = (0, 0, 0, 0);
-        }
-
-        let border = edge_colors(&frame, &self.params, self.bars);
-        let mapped = map_to_leds(&border, self.lamp_count);
-        let raw: Vec<[u8; 3]> = mapped.iter().map(|c| [c.r, c.g, c.b]).collect();
-
         let now = Instant::now();
         let dt_ms = self
             .last_extract
             .map(|t| now.duration_since(t).as_secs_f32() * 1000.0)
             .unwrap_or(33.0);
         self.last_extract = Some(now);
+
+        // Bars: found by their edge in automatic mode, by the black level in manual mode.
+        let skip = self.auto || self.params.skip_black_bars;
+        if skip {
+            let seen = if self.auto { detect_bars_edge(&frame) } else { detect_bars(&frame, self.params.black_level) };
+            self.bars = stabilise(self.bars, seen);
+        } else {
+            self.bars = (0, 0, 0, 0);
+        }
+        let mut p = self.params;
+        p.skip_black_bars = skip;
+        if self.auto {
+            // measure how busy the edge is at a fixed reference depth, then ease toward the target
+            let mut probe = p;
+            probe.depth_pct = 10;
+            let (_, s) = sample_edges(data, pitch as usize, width as usize, height as usize, &probe, self.bars);
+            self.auto_depth = smooth_depth(self.auto_depth, auto_depth_target(edge_busyness(&s)), dt_ms);
+            p.depth_pct = self.auto_depth.round().clamp(3.0, 40.0) as u8;
+        }
+
+        let border = edge_colors(&frame, &p, self.bars);
+        let mapped = map_to_leds(&border, self.lamp_count);
+        let raw: Vec<[u8; 3]> = mapped.iter().map(|c| [c.r, c.g, c.b]).collect();
 
         let out = if self.smoothing { self.smoother.update(&raw, dt_ms) } else { raw };
         out.into_iter().map(|c| (c[0], c[1], c[2])).collect()
@@ -543,7 +646,7 @@ mod tests {
         let d = frame(160, 90, |_, y| if !(12..78).contains(&y) { (0, 0, 0) } else { ORANGE });
         let f = view(&d, 160, 90);
         assert_eq!(detect_bars(&f, 26), (12, 12, 0, 0));
-        let d = frame(160, 90, |_, y| if y < 12 || y >= 80 { (0, 0, 0) } else { ORANGE }); // 12 top, 10 bottom
+        let d = frame(160, 90, |_, y| if !(12..80).contains(&y) { (0, 0, 0) } else { ORANGE }); // 12 top, 10 bottom
         assert_eq!(detect_bars(&view(&d, 160, 90), 26), (10, 10, 0, 0));
         // a 1-line dark edge is not worth skipping
         let d = frame(160, 90, |_, y| if y == 0 || y == 89 { (0, 0, 0) } else { ORANGE });
@@ -565,6 +668,108 @@ mod tests {
         assert_eq!(detect_bars(&view(&grey, 160, 90), level), (0, 0, 0, 0));
     }
 
+    // ── automatic mode ──
+
+    fn bars_edge(d: &[u8], w: usize, h: usize) -> (usize, usize, usize, usize) {
+        detect_bars_edge(&view(d, w, h))
+    }
+
+    #[test]
+    fn auto_finds_bars_of_any_dark_shade_without_a_threshold() {
+        for bar in [0, 6, 17, 24, 32] {
+            let d = frame(160, 90, |_, y| if !(12..78).contains(&y) { (bar, bar, bar) } else { ORANGE });
+            assert_eq!(bars_edge(&d, 160, 90), (12, 12, 0, 0), "bar value {bar}");
+        }
+        let noisy = frame(160, 90, |x, y| {
+            if !(12..78).contains(&y) { let v = (17 + ((x * 7919 + y * 104729) % 7) as i32 - 3) as u8; (v, v, v) } else { ORANGE }
+        });
+        assert_eq!(bars_edge(&noisy, 160, 90), (12, 12, 0, 0));
+        let pillar = frame(160, 90, |x, _| if !(20..140).contains(&x) { (0, 0, 0) } else { ORANGE });
+        assert_eq!(bars_edge(&pillar, 160, 90), (0, 0, 20, 20));
+        let boxed = frame(160, 90, |x, y| if !(12..78).contains(&y) || !(20..140).contains(&x) { (0, 0, 0) } else { ORANGE });
+        assert_eq!(bars_edge(&boxed, 160, 90), (12, 12, 20, 20));
+    }
+
+    #[test]
+    fn auto_does_not_mistake_picture_for_bars() {
+        // mid-grey border, bright border, plain picture
+        for v in [60u8, 120, 220] {
+            let d = frame(160, 90, |_, y| if !(12..78).contains(&y) { (v, v, v) } else { ORANGE });
+            assert_eq!(bars_edge(&d, 160, 90), (0, 0, 0, 0), "border value {v}");
+        }
+        assert_eq!(bars_edge(&frame(160, 90, |_, _| ORANGE), 160, 90), (0, 0, 0, 0));
+        // a gradual fade to black is a dark scene, not a bar
+        let fade = frame(160, 90, |_, y| { let v = (y as u32 * 3).min(255) as u8; (v, v, v) });
+        assert_eq!(bars_edge(&fade, 160, 90), (0, 0, 0, 0));
+        // dark sky on one side only
+        let sky = frame(160, 90, |_, y| if y < 27 { (2, 2, 2) } else { (70, 80, 60) });
+        assert_eq!(bars_edge(&sky, 160, 90), (0, 0, 0, 0));
+        // an all-black frame has no edge to find
+        assert_eq!(bars_edge(&frame(160, 90, |_, _| (0, 0, 0)), 160, 90), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn auto_depth_is_shallow_for_smooth_video_and_deep_for_busy_edges() {
+        let p = params(10, true);
+        let busy_of = |d: &[u8]| {
+            let f = view(d, 160, 90);
+            let (_, s) = sample_edges(f.data, f.pitch, f.w, f.h, &p, (0, 0, 0, 0));
+            edge_busyness(&s)
+        };
+        let smooth = frame(160, 90, |_, y| (40 + (y * 2) as u8, 90, 200 - y as u8)); // vertical gradient video
+        let flat = frame(160, 90, |_, _| (90, 140, 200));
+        // game HUD / text / web page: strongly varying colours along the edge
+        let busy = frame(160, 90, |x, y| if ((x / 10) + (y / 10)) % 2 == 0 { (240, 240, 240) } else { (20, 30, 120) });
+        // fine texture that the LED segments average out: busier than video, not as busy as HUD blocks
+        let fine = frame(160, 90, |x, y| if ((x / 5) + (y / 5)) % 2 == 0 { (240, 240, 240) } else { (20, 30, 120) });
+        let (ds, df, db) = (auto_depth_target(busy_of(&smooth)), auto_depth_target(busy_of(&flat)), auto_depth_target(busy_of(&busy)));
+        let dfine = auto_depth_target(busy_of(&fine));
+        assert!(ds <= 11.0 && df <= 11.0, "smooth edges stay shallow: {ds} {df}");
+        assert!(db >= 19.0, "busy edges go deep: {db}");
+        assert!(dfine > ds + 5.0 && dfine <= db, "fine texture lands in between: {dfine}");
+        for d in [ds, df, db] {
+            assert!((10.0..=20.0).contains(&d));
+        }
+        assert_eq!(auto_depth_target(f32::NAN), 10.0);
+    }
+
+    #[test]
+    fn auto_depth_moves_smoothly_and_converges() {
+        let mut d = 10.0f32;
+        let mut prev = d;
+        for _ in 0..30 {
+            d = smooth_depth(d, 20.0, 16.0);
+            assert!(d >= prev && d - prev < 0.2, "one 16 ms frame moves the depth only a little");
+            prev = d;
+        }
+        for _ in 0..600 {
+            d = smooth_depth(d, 20.0, 16.0);
+        }
+        assert!((d - 20.0).abs() < 0.05);
+        assert_eq!(smooth_depth(12.0, 20.0, f32::NAN.max(0.0)), 12.0);
+        assert!(smooth_depth(12.0, 20.0, 1.0e9) < 20.0 + 1e-3, "huge dt is clamped");
+    }
+
+    #[test]
+    fn auto_extractor_skips_bars_without_any_settings() {
+        use crate::config::SyncConfig;
+        let sync = SyncConfig { detect_auto: true, skip_black_bars: false, ..SyncConfig::default() }; // skip flag off: auto ignores it
+        let mut ex = ColorExtractor::new(71, &sync);
+        let d = letterboxed();
+        let mut out = Vec::new();
+        for _ in 0..5 {
+            out = ex.extract(&d, 160 * 4, 160, 90);
+        }
+        assert_eq!(ex.bars(), (8, 8, 0, 0));
+        assert!(out.iter().any(|c| c.0 > 100), "LEDs carry the picture colour, not black");
+        assert!((10..=20).contains(&ex.effective_depth()));
+        // manual mode with the sliders keeps working
+        let manual = SyncConfig { detect_auto: false, edge_depth_pct: 25, skip_black_bars: false, ..SyncConfig::default() };
+        let mut ex = ColorExtractor::new(71, &manual);
+        ex.extract(&d, 160 * 4, 160, 90);
+        assert_eq!((ex.bars(), ex.effective_depth()), ((0, 0, 0, 0), 25));
+    }
+
     /// Developer report used to choose the default depth and black level. Run with:
     /// `cargo test tuning_report -- --ignored --nocapture`
     #[test]
@@ -581,7 +786,7 @@ mod tests {
         // letterboxed 2.39:1 (12 rows of bar at each side), bars of a given value (+ noise)
         let letterbox = |bar: i32, noisy: bool| {
             frame(w, h, move |x, y| {
-                if y < 12 || y >= 78 { grey(bar + if noisy { noise(x, y) } else { 0 }) } else { pic((y - 12) as f32 / 66.0) }
+                if !(12..78).contains(&y) { grey(bar + if noisy { noise(x, y) } else { 0 }) } else { pic((y - 12) as f32 / 66.0) }
             })
         };
         let a = letterbox(0, false); // pure black bars
@@ -589,7 +794,7 @@ mod tests {
         let c = letterbox(24, false); // dark-grey page chrome (#181818)
         let d = frame(w, h, |x, y| if !(20..140).contains(&x) { (0, 0, 0) } else { pic(y as f32 / 90.0) }); // 4:3 pillarbox
         let e = frame(w, h, |x, y| { // window-boxed: bars on all four sides
-            if y < 12 || y >= 78 || !(20..140).contains(&x) { (0, 0, 0) } else { pic((y - 12) as f32 / 66.0) }
+            if !(12..78).contains(&y) || !(20..140).contains(&x) { (0, 0, 0) } else { pic((y - 12) as f32 / 66.0) }
         });
         let f_dark = frame(w, h, |x, y| { // dark scene, no bars, bright subject starting ~20% in
             if (18..72).contains(&y) && (40..120).contains(&x) { (200, 180, 150) } else { grey(6) }

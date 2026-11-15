@@ -71,7 +71,11 @@ pub struct SyncConfig {
     /// `light_compression` is on). Highlights can reach full brightness; only the total is capped.
     #[serde(default = "default_power_limit_pct")]
     pub power_limit_pct: u8,
-    /// How far in from each screen edge the LEDs look, in percent of the screen size.
+    /// Judge the screen in real time: bars are found by their edge and the depth adapts between
+    /// 10% and 20%. When off, `edge_depth_pct`, `skip_black_bars` and `black_level` apply.
+    #[serde(default = "default_true")]
+    pub detect_auto: bool,
+    /// How far in from each screen edge the LEDs look, in percent of the screen size (manual).
     #[serde(default = "default_edge_depth_pct")]
     pub edge_depth_pct: u8,
     /// Sample just inside black bars (letterboxed / pillarboxed video) instead of on them.
@@ -370,6 +374,7 @@ impl Default for SyncConfig {
             decay_ms: default_decay_ms(),
             deadband: default_deadband(),
             power_limit_pct: default_power_limit_pct(),
+            detect_auto: true,
             edge_depth_pct: default_edge_depth_pct(),
             skip_black_bars: true,
             black_level: default_black_level(),
@@ -448,6 +453,7 @@ mod tests {
         assert_eq!(c.device.lamps_amount, 65);
         assert_eq!(c.capture.fps, 60);
         assert_eq!(c.capture.game_fps, 30);
+        assert!(c.sync.detect_auto, "automatic detection is on by default");
         assert_eq!(c.sync.edge_depth_pct, 15);
         assert!(c.sync.skip_black_bars);
         assert_eq!(c.sync.black_level, 26);

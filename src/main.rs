@@ -375,7 +375,7 @@ fn capture_loop(
                 stat_ext += t_ext.elapsed();
                 if viewer_open {
                     if let Some(share) = frame_share.as_mut() {
-                        share.publish_bgra(&frame.data, frame.pitch as usize, frame.width as usize, frame.height as usize, extractor.bars());
+                        share.publish_bgra(&frame.data, frame.pitch as usize, frame.width as usize, frame.height as usize, extractor.bars(), extractor.effective_depth());
                     }
                 }
 

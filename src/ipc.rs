@@ -141,7 +141,7 @@ pub const FRAME_SHARE_NAME: &str = "Local\\SYNCFASTERGB_Frame";
 const MAX_FRAME_W: usize = 192;
 const MAX_FRAME_H: usize = 192;
 /// Layout: [0..4] seq, [4..8] width, [8..12] height, [12..28] bars (top, bottom, left, right),
-/// [32..] BGRA pixels.
+/// [28..32] depth in percent, [32..] BGRA pixels.
 const FRAME_HEADER: usize = 32;
 const FRAME_SIZE: usize = FRAME_HEADER + MAX_FRAME_W * MAX_FRAME_H * 4;
 
@@ -193,12 +193,12 @@ impl FrameShare {
     }
 
     /// Publish a BGRA frame with the black bars currently skipped (top, bottom, left, right).
-    pub fn publish_bgra(&mut self, data: &[u8], pitch: usize, w: usize, h: usize, bars: (usize, usize, usize, usize)) {
+    pub fn publish_bgra(&mut self, data: &[u8], pitch: usize, w: usize, h: usize, bars: (usize, usize, usize, usize), depth_pct: u8) {
         if w == 0 || h == 0 {
             return;
         }
         let (ow, oh, step, pixels) = shrink_bgra(data, pitch, w, h);
-        let header = [ow as u32, oh as u32, (bars.0 / step) as u32, (bars.1 / step) as u32, (bars.2 / step) as u32, (bars.3 / step) as u32];
+        let header = [ow as u32, oh as u32, (bars.0 / step) as u32, (bars.1 / step) as u32, (bars.2 / step) as u32, (bars.3 / step) as u32, depth_pct as u32];
         // SAFETY: `view` points to FRAME_SIZE writable bytes for the lifetime of `self`;
         // ow <= MAX_FRAME_W and oh <= MAX_FRAME_H, so FRAME_HEADER + ow*oh*4 <= FRAME_SIZE.
         unsafe {
@@ -231,6 +231,8 @@ pub struct FrameSnapshot {
     pub h: usize,
     /// (top, bottom, left, right) black bars the engine is skipping, in picture lines.
     pub bars: (usize, usize, usize, usize),
+    /// Detection depth in percent the engine is using (automatic or manual).
+    pub depth_pct: u8,
     /// BGRA, `w * h * 4` bytes.
     pub bgra: Vec<u8>,
 }
@@ -273,9 +275,10 @@ impl FrameView {
                 return None;
             }
             let bars = (rd(12).min(h), rd(16).min(h), rd(20).min(w), rd(24).min(w));
+            let depth_pct = if rd(28) == 0 { 15 } else { rd(28).clamp(3, 40) as u8 };
             let mut bgra = vec![0u8; w * h * 4];
             std::ptr::copy_nonoverlapping(base.add(FRAME_HEADER), bgra.as_mut_ptr(), bgra.len());
-            Some(FrameSnapshot { seq, w, h, bars, bgra })
+            Some(FrameSnapshot { seq, w, h, bars, depth_pct, bgra })
         }
     }
 }
@@ -329,12 +332,12 @@ mod tests {
         assert!(r.read().is_none(), "nothing published yet");
         // 4x2 BGRA frame, distinct pixels
         let px: Vec<u8> = (0..4 * 2 * 4).map(|i| i as u8).collect();
-        w.publish_bgra(&px, 4 * 4, 4, 2, (1, 0, 2, 0));
+        w.publish_bgra(&px, 4 * 4, 4, 2, (1, 0, 2, 0), 17);
         let s = r.read().unwrap();
-        assert_eq!((s.w, s.h, s.bars), (4, 2, (1, 0, 2, 0)));
+        assert_eq!((s.w, s.h, s.bars, s.depth_pct), (4, 2, (1, 0, 2, 0), 17));
         assert_eq!(s.bgra, px);
         let seq1 = s.seq;
-        w.publish_bgra(&px, 16, 4, 2, (0, 0, 0, 0));
+        w.publish_bgra(&px, 16, 4, 2, (0, 0, 0, 0), 12);
         assert_ne!(r.read().unwrap().seq, seq1);
     }
 
@@ -361,7 +364,7 @@ mod tests {
         let name = "Local\\SYNCFASTERGB_Frame_test_hostile";
         let mut w = FrameShare::create_named(name).unwrap();
         let r = FrameView::open_named(name).unwrap();
-        w.publish_bgra(&[1, 2, 3, 4], 4, 1, 1, (0, 0, 0, 0));
+        w.publish_bgra(&[1, 2, 3, 4], 4, 1, 1, (0, 0, 0, 0), 12);
         assert!(r.read().is_some());
         // corrupt the shared header from the writer's side: absurd width
         // SAFETY: test-only write into the writer's own mapping header.

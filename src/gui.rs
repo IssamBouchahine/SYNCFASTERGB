@@ -506,6 +506,8 @@ struct FrameData {
     w: usize,
     h: usize,
     bars: (usize, usize, usize, usize),
+    /// Detection depth in percent the engine is using.
+    depth_pct: u8,
     bgra: Vec<u8>,
 }
 
@@ -537,7 +539,7 @@ fn demo_frame() -> FrameData {
             bgra[o + 2] = r;
         }
     }
-    FrameData { w, h, bars: (8, 8, 0, 0), bgra }
+    FrameData { w, h, bars: (8, 8, 0, 0), depth_pct: 15, bgra }
 }
 
 /// New detection depth (percent) when a strip's inner edge is dragged to the pointer at
@@ -643,7 +645,7 @@ impl SettingsGui {
                         Some(t) => t.set(img, egui::TextureOptions::LINEAR),
                         None => self.frame_tex = Some(ctx.load_texture("detect_live", img, egui::TextureOptions::LINEAR)),
                     }
-                    self.frame = Some(FrameData { w: snap.w, h: snap.h, bars: snap.bars, bgra: snap.bgra });
+                    self.frame = Some(FrameData { w: snap.w, h: snap.h, bars: snap.bars, depth_pct: snap.depth_pct, bgra: snap.bgra });
                     self.frame_at = now;
                 }
             }
@@ -953,35 +955,67 @@ impl SettingsGui {
         });
 
         // Detection area: how deep the LEDs look, and black-bar handling
+        let now = ui.input(|i| i.time);
+        let live_info = match (&self.frame, self.frame_at) {
+            (Some(fr), at) if now - at < 3.0 => {
+                Some((fr.depth_pct, fr.bars.0 * 100 / fr.h.max(1), fr.bars.2 * 100 / fr.w.max(1)))
+            }
+            _ => None,
+        };
         section(ui, "Detection area", |ui| {
             self.draw_detection_illustration(ui);
             let mut ch = false;
-            let mut depth = self.config.sync.edge_depth_pct as f32;
-            if slider_row(ui, "Depth from the screen edge", &mut depth, 3.0, 40.0, " %", 0) {
-                self.config.sync.edge_depth_pct = depth.round() as u8;
+            let sel = if self.config.sync.detect_auto { 0 } else { 1 };
+            if let Some(i) = segmented_compact(ui, &["Automatic (recommended)", "Manual"], sel) {
+                self.config.sync.detect_auto = i == 0;
                 ch = true;
             }
-            ui.label(
-                egui::RichText::new(
-                    "How far into the picture each LED looks (the blue outline in the preview). Larger is smoother and \
-                     steadier; smaller follows the very edge more precisely.",
-                )
-                .size(11.5)
-                .color(theme::MUTED),
-            );
             ui.add_space(4.0);
-            ch |= ui.checkbox(&mut self.config.sync.skip_black_bars, "Ignore black bars (letterboxed or pillarboxed video)").changed();
-            if self.config.sync.skip_black_bars {
-                let mut level = self.config.sync.black_level as f32;
-                if slider_row(ui, "Black level", &mut level, 2.0, 80.0, "", 0) {
-                    self.config.sync.black_level = level.round() as u8;
+            if self.config.sync.detect_auto {
+                let status = match live_info {
+                    Some((depth, top, side)) => format!(
+                        "Judging your screen in real time: depth {depth}%, black bars {top}% top and bottom, {side}% left and right"
+                    ),
+                    None => "Judging your screen in real time (waiting for the engine)".to_string(),
+                };
+                ui.label(egui::RichText::new(status).size(12.5).color(theme::ACCENT));
+                ui.label(
+                    egui::RichText::new(
+                        "Black bars are found by their sharp edge, so no brightness setting is needed. The depth adapts between \
+                         10% and 20%: shallow and precise for smooth video, deeper and steadier for busy edges such as game HUDs \
+                         and web pages. Switch to Manual, or drag a strip's edge in the picture, to set it yourself.",
+                    )
+                    .size(11.5)
+                    .color(theme::MUTED),
+                );
+            } else {
+                let mut depth = self.config.sync.edge_depth_pct as f32;
+                if slider_row(ui, "Depth from the screen edge", &mut depth, 3.0, 40.0, " %", 0) {
+                    self.config.sync.edge_depth_pct = depth.round() as u8;
                     ch = true;
                 }
                 ui.label(
-                    egui::RichText::new("Screen lines darker than this count as black bars and are skipped. Raise it if dark bars still dim the LEDs.")
-                        .size(11.5)
-                        .color(theme::MUTED),
+                    egui::RichText::new(
+                        "How far into the picture each LED looks (the blue outline in the preview). Larger is smoother and \
+                         steadier; smaller follows the very edge more precisely.",
+                    )
+                    .size(11.5)
+                    .color(theme::MUTED),
                 );
+                ui.add_space(4.0);
+                ch |= ui.checkbox(&mut self.config.sync.skip_black_bars, "Ignore black bars (letterboxed or pillarboxed video)").changed();
+                if self.config.sync.skip_black_bars {
+                    let mut level = self.config.sync.black_level as f32;
+                    if slider_row(ui, "Black level", &mut level, 2.0, 80.0, "", 0) {
+                        self.config.sync.black_level = level.round() as u8;
+                        ch = true;
+                    }
+                    ui.label(
+                        egui::RichText::new("Screen lines darker than this count as black bars and are skipped. Raise it if dark bars still dim the LEDs.")
+                            .size(11.5)
+                            .color(theme::MUTED),
+                    );
+                }
             }
             if ch {
                 self.save_and_apply(0.0);
@@ -1297,7 +1331,14 @@ impl SettingsGui {
     fn draw_detection_illustration(&mut self, ui: &mut egui::Ui) {
         let now = ui.input(|i| i.time);
         let live = self.frame.is_some() && now - self.frame_at < 3.0;
-        let params = EdgeParams::from_sync(&self.config.sync);
+        let mut params = EdgeParams::from_sync(&self.config.sync);
+        if self.config.sync.detect_auto {
+            params.skip_black_bars = true;
+            params.depth_pct = match (&self.frame, live) {
+                (Some(f), true) => f.depth_pct,
+                _ => 15,
+            };
+        }
         let (fw, fh, geo, samples, tex_id) = {
             let fd: &FrameData = match (&self.frame, live) {
                 (Some(f), true) => f,
@@ -1305,7 +1346,7 @@ impl SettingsGui {
             };
             let tex = if live { self.frame_tex.as_ref() } else { self.demo_tex.as_ref() };
             let Some(tex) = tex else { return };
-            let bars = if self.config.sync.skip_black_bars { fd.bars } else { (0, 0, 0, 0) };
+            let bars = if params.skip_black_bars { fd.bars } else { (0, 0, 0, 0) };
             let (geo, samples) = extractor::sample_edges(&fd.bgra, fd.w * 4, fd.w, fd.h, &params, bars);
             (fd.w, fd.h, geo, samples, tex.id())
         };
@@ -1380,8 +1421,9 @@ impl SettingsGui {
         if resp.dragged() {
             if let (Some(edge), Some(p)) = (self.drag_edge, resp.interact_pointer_pos()) {
                 let pct = drag_depth_pct(edge, (p.x - rect.left()) / scale, (p.y - rect.top()) / scale, &geo, fw, fh);
-                if pct != self.config.sync.edge_depth_pct {
+                if pct != self.config.sync.edge_depth_pct || self.config.sync.detect_auto {
                     self.config.sync.edge_depth_pct = pct;
+                    self.config.sync.detect_auto = false; // taking over by hand switches to manual
                     self.dirty = true;
                 }
             }
