@@ -106,7 +106,7 @@ pub fn print_list() {
     match enumerate() {
         Ok(list) if list.is_empty() => println!("No monitors found."),
         Ok(list) => {
-            println!("Monitors (use `monitor = <index>` or `monitor_name = \"<text>\"` in config.toml):\n");
+            println!("Monitors found (choose one in the settings window; [n] is the index across all GPUs):\n");
             for m in &list {
                 println!(
                     "  [{}] {}  |  {}  |  {}x{} at ({},{}){}",
