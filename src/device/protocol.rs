@@ -65,14 +65,21 @@ fn checksum(data: &[u8]) -> u8 {
 static SESSION_COUNTER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
 
 fn next_session_id() -> u8 {
-    let id = SESSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if id == 0 { SESSION_COUNTER.store(1, std::sync::atomic::Ordering::Relaxed); }
-    id
+    // 0은 건너뛴다 (1..=255 순환)
+    loop {
+        let id = SESSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if id != 0 {
+            return id;
+        }
+    }
 }
 
 /// RB 패킷 생성 (dedicated action code)
 fn build_rb_packet(action: u8, payload: &[u8]) -> Vec<u8> {
-    let sid = next_session_id();
+    build_rb_packet_with_sid(next_session_id(), action, payload)
+}
+
+fn build_rb_packet_with_sid(sid: u8, action: u8, payload: &[u8]) -> Vec<u8> {
     let total_len = 2 + 1 + 1 + 1 + payload.len() + 1;
     let mut packet = Vec::with_capacity(total_len);
 
@@ -99,7 +106,10 @@ pub fn get_device_info() -> Vec<u8> {
 /// 화면 동기화 색상 전송 (setSyncScreen = 0x80)
 /// SC 프로토콜: "SC"(2) + 길이(2, BigEndian) + 세션ID(1) + 액션(1) + 색상데이터 + 체크섬(1)
 pub fn set_sync_screen(colors: &[u8]) -> Vec<u8> {
-    let sid = next_session_id();
+    set_sync_screen_with_sid(next_session_id(), colors)
+}
+
+fn set_sync_screen_with_sid(sid: u8, colors: &[u8]) -> Vec<u8> {
     let total_len = 7 + colors.len();
     let mut packet = Vec::with_capacity(total_len);
 
@@ -187,10 +197,89 @@ pub fn parse_response(data: &[u8]) -> Option<RbResponse> {
     }
 
     let total_len = data[2] as usize;
-    if data.len() < total_len {
+    // 장치가 보낸 길이는 신뢰하지 않는다: 최소 6바이트, 실제 수신 길이 이내
+    if total_len < 6 || data.len() < total_len {
         return None;
     }
 
     let payload = data[5..total_len - 1].to_vec();
     Some(RbResponse { payload })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checksum_wraps() {
+        assert_eq!(checksum(&[0xFF, 0x02]), 0x01);
+        assert_eq!(checksum(&[]), 0);
+    }
+
+    #[test]
+    fn rb_turn_off_golden() {
+        // "RB"(0x52,0x42) + len 6 + sid 1 + 0x97 + chk
+        let p = build_rb_packet_with_sid(1, action::TURN_OFF_LIGHT, &[]);
+        assert_eq!(p, vec![0x52, 0x42, 0x06, 0x01, 0x97, 0x52u8.wrapping_add(0x42 + 6 + 1).wrapping_add(0x97)]);
+        assert_eq!(p.len(), 6);
+    }
+
+    #[test]
+    fn rb_brightness_golden() {
+        let p = build_rb_packet_with_sid(2, action::SET_BRIGHTNESS, &[0x80]);
+        assert_eq!(&p[..6], &[0x52, 0x42, 0x07, 0x02, 0x87, 0x80]);
+        assert_eq!(p[6], checksum(&p[..6]));
+    }
+
+    #[test]
+    fn sc_packet_golden() {
+        // one LED group: [index, R, G, B, index]
+        let colors = [1u8, 10, 20, 30, 1];
+        let p = set_sync_screen_with_sid(5, &colors);
+        assert_eq!(&p[..6], &[0x53, 0x43, 0x00, 12, 5, 0x80]);
+        assert_eq!(&p[6..11], &colors);
+        assert_eq!(p.len(), 12);
+        assert_eq!(p[11], checksum(&p[..11]));
+    }
+
+    #[test]
+    fn sc_length_is_big_endian_for_71_leds() {
+        let colors = vec![0u8; 71 * 5];
+        let p = set_sync_screen_with_sid(1, &colors);
+        assert_eq!(p.len(), 362);
+        assert_eq!(((p[2] as usize) << 8) | p[3] as usize, 362);
+    }
+
+    #[test]
+    fn session_ids_never_zero() {
+        for _ in 0..1000 {
+            assert_ne!(next_session_id(), 0);
+        }
+    }
+
+    #[test]
+    fn chunking() {
+        assert_eq!(chunk_packet(&[1; 10]).len(), 1);
+        assert_eq!(chunk_packet(&[1; 64]).len(), 1);
+        let c = chunk_packet(&[1; 130]);
+        assert_eq!(c.iter().map(|x| x.len()).collect::<Vec<_>>(), vec![64, 64, 2]);
+    }
+
+    #[test]
+    fn parse_response_accepts_valid() {
+        let p = build_rb_packet_with_sid(1, action::READ_DEVICE_INFO, &[9, 8, 7]);
+        assert_eq!(parse_response(&p).unwrap().payload, vec![9, 8, 7]);
+    }
+
+    #[test]
+    fn parse_response_rejects_hostile_input_without_panicking() {
+        // declared length shorter than the header, zero, or longer than data
+        for len in [0u8, 1, 3, 5, 200, 255] {
+            let d = [0x52, 0x42, len, 1, 0x82, 0, 0, 0];
+            let _ = parse_response(&d);
+        }
+        assert!(parse_response(&[]).is_none());
+        assert!(parse_response(b"RB").is_none());
+        assert!(parse_response(&[0x52, 0x42, 0, 1, 0x82, 0]).is_none());
+    }
 }

@@ -781,7 +781,7 @@ impl SettingsGui {
                         && self.config.effect.color_b == b;
                     if resp.hovered() || is_sel {
                         let sc = if is_sel { egui::Color32::from_rgb(0, 180, 255) } else { egui::Color32::WHITE };
-                        ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(2.0, sc));
+                        ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(2.0_f32, sc));
                     }
                     if resp.clicked() {
                         self.config.effect.color_r = r;
@@ -902,7 +902,7 @@ fn effect_button(ui: &mut egui::Ui, name: &str, color: egui::Color32, selected: 
 
     ui.painter().rect_filled(rect, 8.0, bg);
     if selected {
-        ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(2.0, color));
+        ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(2.0_f32, color));
     }
 
     // 상단 색상 바
