@@ -314,14 +314,19 @@ impl Config {
 
     /// Remove everything this program stores on the PC: the settings and the autostart entry.
     pub fn forget_everything() -> Result<(), Box<dyn std::error::Error>> {
+        Self::forget_store_key(STORE_KEY)?;
+        set_autostart(false)
+    }
+
+    /// Delete one settings key; a key that does not exist is not an error.
+    pub fn forget_store_key(key_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         use winreg::enums::HKEY_CURRENT_USER;
         use winreg::RegKey;
-        match RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(STORE_KEY) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+        match RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(key_path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
         }
-        set_autostart(false)
     }
 }
 
@@ -476,6 +481,18 @@ mod tests {
 
         let _ = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).delete_subkey_all(key);
         assert!(Config::load_from_key(key).is_none());
+    }
+
+    #[test]
+    fn forgetting_removes_stored_settings_and_tolerates_missing_keys() {
+        let key = r"Software\SYNCFASTERGB_Test_forget";
+        Config::forget_store_key(key).unwrap(); // nothing there yet: fine
+        Config::default().save_to_key(key).unwrap();
+        assert!(Config::load_from_key(key).is_some());
+        Config::forget_store_key(key).unwrap();
+        assert!(Config::load_from_key(key).is_none());
+        assert_eq!(Config::revision_of(key), 0);
+        Config::forget_store_key(key).unwrap(); // already gone: still fine
     }
 
     #[test]
