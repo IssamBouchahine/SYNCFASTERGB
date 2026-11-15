@@ -47,7 +47,7 @@ Command line: `--settings` (open the settings window), `--list-monitors`, `--con
 | `sync.brightness` | 0..255 software brightness |
 | `sync.saturation`, `sync.gamma` | Color grading |
 | `sync.attack_ms`, `sync.decay_ms`, `sync.deadband` | Smoothing |
-| `sync.compression_limit` | Max R+G+B per LED; protects weak USB ports. Raise with care |
+| `sync.power_limit_pct` | Whole-strip power budget, percent of all-LEDs-white (default 40, max 80). Highlights can be full brightness; only the total is capped |
 
 ## Build
 
@@ -60,6 +60,22 @@ cargo clippy --locked --all-targets -- -D warnings
 ```
 
 Output: `target\release\syncfastergb.exe`. The C runtime is linked statically.
+
+## Hardware safety
+
+Designed to be gentle on the laptop and the strip:
+
+- **USB power:** a whole-strip power budget (default 40%, hard ceiling 80% of "every LED fully white")
+  keeps the draw within what a laptop USB port is built to supply. If the strip repeatedly drops off the
+  bus while drawing a lot, the app lowers its own budget for the rest of the session.
+- **Strip memory:** brightness is applied in software while syncing; commands that may be stored in
+  the strip's flash (hardware-effect brightness) are debounced, so dragging a slider never floods it.
+- **Disk:** the app writes only `config.toml` (when you change a setting, and only if it changed) and a
+  size-capped log (about 1 MB, rotated). No steady background writes; the registry is touched only when
+  you toggle "Start with Windows".
+- **CPU/GPU:** frames are shrunk on the GPU that already drives your monitor; typical load is a few
+  percent of one core while the picture is moving, and almost nothing on a still screen.
+- **No admin rights, no network, no drivers.**
 
 ## Security stance
 

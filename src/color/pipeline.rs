@@ -84,8 +84,6 @@ pub struct Grade {
     pub saturation_gain: f32,
     /// Output gamma (1.0 = unchanged).
     pub gamma: f32,
-    /// Max R+G+B per LED (power/brightness budget); `None` = unlimited.
-    pub compression_limit: Option<u16>,
     /// Make near-pure primaries purer (stock look).
     pub purify: bool,
     /// Max channel below this is black; ramps to full by `knee_hi`.
@@ -100,7 +98,6 @@ impl Default for Grade {
         Self {
             saturation_gain: 2.0,
             gamma: 1.0,
-            compression_limit: Some(255),
             purify: true,
             knee_lo: 8,
             knee_hi: 28,
@@ -209,17 +206,38 @@ fn apply_gamma(c: [u8; 3], gamma: f32) -> [u8; 3] {
     [f(c[0]), f(c[1]), f(c[2])]
 }
 
-fn compress(c: [u8; 3], limit: u16) -> [u8; 3] {
-    let sum = c[0] as u16 + c[1] as u16 + c[2] as u16;
-    if sum <= limit || sum == 0 {
-        return c;
+/// Whole-strip power budget. Individual LEDs may reach full intensity; only when the
+/// strip as a whole would draw more than `max_fraction` of "every LED fully white" are all
+/// LEDs scaled down together (keeps hue, protects weak USB ports).
+pub fn limit_total_power(leds: &mut [[u8; 3]], max_fraction: f32) {
+    if leds.is_empty() {
+        return;
     }
-    let r = limit as f32 / sum as f32;
-    [(c[0] as f32 * r) as u8, (c[1] as f32 * r) as u8, (c[2] as f32 * r) as u8]
+    let f = if max_fraction.is_nan() { 1.0 } else { max_fraction.clamp(0.0, 1.0) };
+    let total: u64 = leds.iter().map(|c| c[0] as u64 + c[1] as u64 + c[2] as u64).sum();
+    let allowed = (leds.len() as f64) * 765.0 * f as f64;
+    if (total as f64) <= allowed || total == 0 {
+        return;
+    }
+    let k = allowed / total as f64;
+    for c in leds.iter_mut() {
+        for ch in c.iter_mut() {
+            *ch = (*ch as f64 * k) as u8;
+        }
+    }
 }
 
-/// Full grade: knee, purify, saturation, gamma, then the power limit last so the
-/// limit applies to what is actually emitted.
+/// Fraction of "every LED fully white" the frame would draw (0.0..=1.0).
+pub fn power_fraction(leds: &[[u8; 3]]) -> f32 {
+    if leds.is_empty() {
+        return 0.0;
+    }
+    let total: u64 = leds.iter().map(|c| c[0] as u64 + c[1] as u64 + c[2] as u64).sum();
+    (total as f64 / (leds.len() as f64 * 765.0)) as f32
+}
+
+/// Full per-LED grade: knee, purify, saturation, gamma, brightness. The whole-strip power
+/// budget is applied afterwards by `limit_total_power`.
 pub fn grade(c: [u8; 3], g: &Grade) -> [u8; 3] {
     let mut c = knee(c, g.knee_lo, g.knee_hi);
     if g.purify {
@@ -227,9 +245,6 @@ pub fn grade(c: [u8; 3], g: &Grade) -> [u8; 3] {
     }
     c = saturate(c, g.saturation_gain);
     c = apply_gamma(c, g.gamma);
-    if let Some(limit) = g.compression_limit {
-        c = compress(c, limit);
-    }
     scale(c, g.brightness)
 }
 
@@ -344,22 +359,73 @@ mod tests {
     }
 
     #[test]
-    fn compression_caps_sum() {
-        let c = compress([255, 255, 255], 255);
-        assert!(c.iter().map(|&v| v as u16).sum::<u16>() <= 255);
-        assert_eq!(compress([10, 10, 10], 255), [10, 10, 10]);
-        assert_eq!(compress([0, 0, 0], 255), [0, 0, 0]);
+    fn power_limit_leaves_dim_scenes_alone() {
+        let mut leds = vec![[10, 10, 10]; 71];
+        let before = leds.clone();
+        limit_total_power(&mut leds, 0.5);
+        assert_eq!(leds, before);
     }
 
     #[test]
-    fn grade_applies_saturation_to_bright_pixels_before_limit() {
+    fn power_limit_allows_bright_highlights_on_dark_scene() {
+        let mut leds = vec![[0, 0, 0]; 71];
+        for l in leds.iter_mut().take(5) {
+            *l = [255, 255, 255];
+        }
+        limit_total_power(&mut leds, 0.5);
+        assert_eq!(leds[0], [255, 255, 255]);
+    }
+
+    #[test]
+    fn power_limit_scales_everything_together_when_over_budget() {
+        let mut leds = vec![[255, 255, 255]; 71];
+        limit_total_power(&mut leds, 0.5);
+        let sum: u64 = leds.iter().map(|c| c.iter().map(|&v| v as u64).sum::<u64>()).sum();
+        assert!(sum as f64 <= 71.0 * 765.0 * 0.5 + 1.0);
+        assert!(leds.iter().all(|c| *c == leds[0]), "uniform scene stays uniform");
+        assert!(leds[0][0] >= 126, "about half brightness, not less: {}", leds[0][0]);
+    }
+
+    #[test]
+    fn power_limit_preserves_hue_and_handles_edge_input() {
+        let mut leds = vec![[200, 100, 50]; 10];
+        limit_total_power(&mut leds, 0.1);
+        let c = leds[0];
+        assert!(c[0] > c[1] && c[1] > c[2]);
+        limit_total_power(&mut [], 0.5);
+        let mut z = vec![[0, 0, 0]; 4];
+        limit_total_power(&mut z, 0.0);
+        assert_eq!(z, vec![[0, 0, 0]; 4]);
+        let mut n = vec![[255, 255, 255]; 4];
+        limit_total_power(&mut n, f32::NAN);
+        assert_eq!(n, vec![[255, 255, 255]; 4]);
+    }
+
+    #[test]
+    fn power_fraction_bounds() {
+        assert_eq!(power_fraction(&[]), 0.0);
+        assert_eq!(power_fraction(&[[0, 0, 0]; 5]), 0.0);
+        assert!((power_fraction(&[[255, 255, 255]; 5]) - 1.0).abs() < 1e-6);
+        let mut leds = vec![[255, 255, 255]; 71];
+        limit_total_power(&mut leds, 0.4);
+        assert!(power_fraction(&leds) <= 0.4 + 0.001);
+    }
+
+    #[test]
+    fn grade_applies_saturation_to_bright_pixels() {
         // stock bug: bright pixels lost the saturation boost entirely
         let g = Grade { purify: false, ..Grade::default() };
         let plain = Grade { saturation_gain: 1.0, purify: false, ..Grade::default() };
         let a = grade([220, 160, 140], &g);
         let b = grade([220, 160, 140], &plain);
         assert!((a[0] as i32 - a[2] as i32) > (b[0] as i32 - b[2] as i32));
-        assert!(a.iter().map(|&v| v as u16).sum::<u16>() <= 255);
+    }
+
+    #[test]
+    fn grade_black_stays_black_and_full_white_stays_full() {
+        let g = Grade::default();
+        assert_eq!(grade([0, 0, 0], &g), [0, 0, 0]);
+        assert_eq!(grade([255, 255, 255], &g), [255, 255, 255]);
     }
 
     #[test]
@@ -382,17 +448,4 @@ mod tests {
         assert_eq!(purify([100, 100, 100]), [100, 100, 100]);
     }
 
-    #[test]
-    fn grade_black_stays_black_and_never_exceeds_limit() {
-        let g = Grade::default();
-        assert_eq!(grade([0, 0, 0], &g), [0, 0, 0]);
-        for r in (0..=255).step_by(15) {
-            for gg in (0..=255).step_by(15) {
-                for b in (0..=255).step_by(15) {
-                    let o = grade([r as u8, gg as u8, b as u8], &g);
-                    assert!(o.iter().map(|&v| v as u16).sum::<u16>() <= 255);
-                }
-            }
-        }
-    }
 }

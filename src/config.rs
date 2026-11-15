@@ -66,9 +66,10 @@ pub struct SyncConfig {
     /// Output hysteresis in 0..255 steps (suppresses shimmer).
     #[serde(default = "default_deadband")]
     pub deadband: f32,
-    /// Max R+G+B per LED when `light_compression` is on (power budget; 255 = stock).
-    #[serde(default = "default_compression_limit")]
-    pub compression_limit: u16,
+    /// Whole-strip power budget in percent of "every LED fully white" (used when
+    /// `light_compression` is on). Highlights can reach full brightness; only the total is capped.
+    #[serde(default = "default_power_limit_pct")]
+    pub power_limit_pct: u8,
 }
 
 /// LED 동작 모드
@@ -189,7 +190,10 @@ fn default_saturation() -> f32 { 2.0 }
 fn default_attack_ms() -> f32 { 40.0 }
 fn default_decay_ms() -> f32 { 250.0 }
 fn default_deadband() -> f32 { 2.0 }
-fn default_compression_limit() -> u16 { 255 }
+/// Highest power budget the app will ever apply (percent of all-LEDs-white).
+pub const MAX_POWER_LIMIT_PCT: u8 = 80;
+
+fn default_power_limit_pct() -> u8 { 40 }
 fn default_true() -> bool { true }
 fn default_edge_number() -> u8 { 3 }
 fn default_255() -> u8 { 255 }
@@ -197,7 +201,7 @@ fn default_50() -> u8 { 50 }
 
 impl SyncConfig {
     pub fn interval_ms(&self) -> u64 {
-        self.speed as u64 + 20
+        self.speed as u64 + 16
     }
 }
 
@@ -234,7 +238,9 @@ impl Config {
         s.attack_ms = f(s.attack_ms, 0.0, 2000.0, 40.0);
         s.decay_ms = f(s.decay_ms, 0.0, 5000.0, 250.0);
         s.deadband = f(s.deadband, 0.0, 10.0, 2.0);
-        s.compression_limit = s.compression_limit.clamp(30, 765);
+        // Hard ceiling: a laptop USB port cannot be asked for more than a fraction of the
+        // strip's worst-case draw, whatever the config file says.
+        s.power_limit_pct = s.power_limit_pct.clamp(10, MAX_POWER_LIMIT_PCT);
         if s.edge_number != 3 && s.edge_number != 4 {
             s.edge_number = 3;
         }
@@ -294,7 +300,12 @@ impl Config {
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let header = "# SYNCFASTERGB settings\n\n";
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(path, format!("{}{}", header, content))?;
+        let full = format!("{}{}", header, content);
+        // Don't rewrite an identical file (saves flash wear and needless hot-reloads).
+        if std::fs::read_to_string(path).is_ok_and(|old| old == full) {
+            return Ok(());
+        }
+        std::fs::write(path, full)?;
         Ok(())
     }
 }
@@ -307,7 +318,7 @@ impl Default for DeviceConfig {
 
 impl Default for CaptureConfig {
     fn default() -> Self {
-        Self { fps: 30, monitor: 0, monitor_name: String::new(), sample_width: 50, gpu_downscale: true, hdr_sdr_white_nits: 240.0 }
+        Self { fps: 60, monitor: 0, monitor_name: String::new(), sample_width: 50, gpu_downscale: true, hdr_sdr_white_nits: 240.0 }
     }
 }
 
@@ -325,7 +336,7 @@ impl Default for SyncConfig {
             attack_ms: default_attack_ms(),
             decay_ms: default_decay_ms(),
             deadband: default_deadband(),
-            compression_limit: default_compression_limit(),
+            power_limit_pct: default_power_limit_pct(),
         }
     }
 }
@@ -401,13 +412,13 @@ mod tests {
     fn empty_config_uses_defaults() {
         let c: Config = toml::from_str("").unwrap();
         assert_eq!(c.device.lamps_amount, 65);
-        assert_eq!(c.capture.fps, 30);
+        assert_eq!(c.capture.fps, 60);
     }
 
     #[test]
     fn sanitize_clamps_dangerous_values() {
         let mut c: Config = toml::from_str(
-            "[device]\nlamps_amount = 100000\n[capture]\nfps = 0\n[sync]\ngamma = nan\nedge_number = 9\ncompression_limit = 0\nattack_ms = -5.0",
+            "[device]\nlamps_amount = 100000\n[capture]\nfps = 0\n[sync]\ngamma = nan\nedge_number = 9\npower_limit_pct = 99\nattack_ms = -5.0",
         )
         .unwrap();
         c.sanitize();
@@ -415,7 +426,7 @@ mod tests {
         assert_eq!(c.capture.fps, 10);
         assert_eq!(c.sync.gamma, 1.0);
         assert_eq!(c.sync.edge_number, 3);
-        assert_eq!(c.sync.compression_limit, 30);
+        assert_eq!(c.sync.power_limit_pct, MAX_POWER_LIMIT_PCT);
         assert_eq!(c.sync.attack_ms, 0.0);
     }
 

@@ -9,6 +9,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
 };
 
+/// Mutex held by the running tray app (the "engine").
+pub const APP_MUTEX: &str = "Local\\SYNCFASTERGB_App";
+
+/// True if some process currently holds the named mutex.
+pub fn is_held(name: &str) -> bool {
+    acquire(name).is_none()
+}
+
 /// Holds a named mutex for as long as it lives.
 pub struct InstanceGuard(HANDLE);
 

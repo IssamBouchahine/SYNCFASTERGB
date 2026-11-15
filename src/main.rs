@@ -3,6 +3,7 @@
 
 mod audio;
 mod capture;
+mod ipc;
 mod single;
 mod color;
 mod config;
@@ -57,7 +58,7 @@ fn main() {
     // the settings window of the running one. After a self-restart the old process may still
     // be shutting down, so wait for it.
     let wait = if restart_count_from_args() > 0 { Duration::from_secs(10) } else { Duration::ZERO };
-    let _instance = match single::acquire_with_retry("Local\\SYNCFASTERGB_App", wait) {
+    let _instance = match single::acquire_with_retry(single::APP_MUTEX, wait) {
         Some(g) => g,
         None => {
             gui::open_settings();
@@ -129,9 +130,9 @@ fn init_logging() {
 
     if !std::env::args().any(|a| a == "--console") {
         if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-            let path = dir.join("syncrgb.log");
+            let path = dir.join("syncfastergb.log");
             if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1_000_000) {
-                let _ = std::fs::rename(&path, dir.join("syncrgb.log.old"));
+                let _ = std::fs::rename(&path, dir.join("syncfastergb.log.old"));
             }
             if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
                 builder.target(env_logger::Target::Pipe(Box::new(file)));
@@ -339,9 +340,13 @@ fn capture_loop(
                     black_frame_count = 0;
                 }
 
-                last_sent = Some(colors.clone());
-                last_send_at = Instant::now();
-                let _ = tx.try_send(colors);
+                // Identical colors are not re-sent (saves USB traffic and CPU); a keepalive
+                // still goes out every 500 ms so the strip never goes quiet.
+                if last_sent.as_ref() != Some(&colors) || last_send_at.elapsed() >= KEEPALIVE {
+                    last_sent = Some(colors.clone());
+                    last_send_at = Instant::now();
+                    let _ = tx.try_send(colors);
+                }
             }
             Err(CaptureError::Timeout) => {
                 dead_since = None; // a timeout just means the screen is static
@@ -399,7 +404,7 @@ fn capture_loop(
 
         if stat_since.elapsed() >= Duration::from_secs(10) {
             if stat_frames > 0 {
-                log::info!(
+                log::debug!(
                     "perf: {} frames/10s, capture {:.2} ms/frame, extract {:.3} ms/frame",
                     stat_frames,
                     stat_cap.as_secs_f64() * 1000.0 / stat_frames as f64,
@@ -456,7 +461,15 @@ fn restart_count_from_args() -> u32 {
 
 #[cfg(test)]
 mod recovery_tests {
-    use super::lost_backoff_ms;
+    use super::{effective_power_limit, lost_backoff_ms};
+
+    #[test]
+    fn derate_applies_even_without_a_configured_limit() {
+        assert_eq!(effective_power_limit(Some(0.4), 1.0), Some(0.4));
+        assert_eq!(effective_power_limit(None, 1.0), None);
+        assert_eq!(effective_power_limit(None, 0.5), Some(0.5));
+        assert!((effective_power_limit(Some(0.4), 0.5).unwrap() - 0.2).abs() < 1e-6);
+    }
 
     #[test]
     fn backoff_grows_then_caps() {
@@ -532,6 +545,15 @@ fn sender_loop(
     let mut send_interval = Duration::from_millis(config.sync.interval_ms());
     let mut brightness = config.sync.brightness;
     let mut grade_params = grade_from_config(&config.sync);
+    let mut power_limit = power_from_config(&config.sync);
+    let mut led_share = ipc::LedShare::create();
+    // Brownout guard: if the strip keeps dropping off the bus while drawing a lot of power,
+    // that looks like the USB port tripping its overcurrent protection. Lower our own
+    // budget for the rest of the session instead of asking for the same power again.
+    let mut derate = 1.0f32;
+    let mut gone_events: Vec<Instant> = Vec::new();
+    // Hardware-effect brightness is debounced: some firmware stores it in flash.
+    let mut fw_brightness_due: Option<Instant> = None;
     let mut current_mode = config.effect.mode.clone();
     let mut effect_cfg = config.effect.clone();
     let mut turn_off_on_sleep = config.app.turn_off_on_sleep;
@@ -634,13 +656,14 @@ fn sender_loop(
             wire_map = WireMap::from_str(&c.device.wire_map);
             send_interval = Duration::from_millis(c.sync.interval_ms());
             grade_params = grade_from_config(&c.sync);
+            power_limit = power_from_config(&c.sync);
 
             // Sync mode scales brightness in software (smooth, no firmware command per change);
             // the firmware level only matters for the strip's built-in effects.
             if brightness != c.sync.brightness {
                 brightness = c.sync.brightness;
                 if current_mode != LedMode::Sync {
-                    if let Some(d) = conn.as_ref() { let _ = d.set_brightness(brightness); }
+                    fw_brightness_due = Some(Instant::now() + Duration::from_millis(600));
                 }
             }
 
@@ -697,13 +720,28 @@ fn sender_loop(
             None => continue,
         };
 
+        if fw_brightness_due.is_some_and(|due| Instant::now() >= due) {
+            fw_brightness_due = None;
+            let _ = d.set_brightness(firmware_brightness(&current_mode, brightness));
+        }
+
         if current_mode == LedMode::Sync {
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(colors) => {
-                    let mut color_data = Vec::with_capacity(colors.len() * 5);
-                    for (i, &(r, g, b)) in colors.iter().enumerate() {
-                        let graded = pipeline::grade([r, g, b], &grade_params);
-                        let wired = wire_map.apply(graded[0], graded[1], graded[2]);
+                    let mut graded: Vec<[u8; 3]> = colors
+                        .iter()
+                        .map(|&(r, g, b)| pipeline::grade([r, g, b], &grade_params))
+                        .collect();
+                    if let Some(fraction) = effective_power_limit(power_limit, derate) {
+                        pipeline::limit_total_power(&mut graded, fraction);
+                    }
+                    let last_draw = pipeline::power_fraction(&graded);
+                    if let Some(share) = led_share.as_mut() {
+                        share.publish(&graded);
+                    }
+                    let mut color_data = Vec::with_capacity(graded.len() * 5);
+                    for (i, g) in graded.iter().enumerate() {
+                        let wired = wire_map.apply(g[0], g[1], g[2]);
                         let idx = (i + 1) as u8;
                         color_data.push(idx);
                         color_data.push(wired[0]);
@@ -718,6 +756,20 @@ fn sender_loop(
                     send_count += 1;
 
                     if let Err(e) = d.set_sync_screen(&color_data) {
+                        if device::serial::classify_error(e.as_ref()) == device::serial::WriteFailure::Gone && last_draw > 0.3 {
+                            let now = Instant::now();
+                            gone_events.retain(|t| now.duration_since(*t) < Duration::from_secs(120));
+                            gone_events.push(now);
+                            if gone_events.len() >= 2 && derate > 0.3 {
+                                derate = (derate * 0.75).max(0.3);
+                                gone_events.clear();
+                                log::warn!(
+                                    "strip dropped off the bus repeatedly while drawing {:.0}% power: lowering the power budget to {:.0}% of the configured value (likely a USB port overcurrent trip)",
+                                    last_draw * 100.0,
+                                    derate * 100.0
+                                );
+                            }
+                        }
                         handle_write_failure(e.as_ref(), &mut conn, &mut link, &mut next_connect_at);
                         continue;
                     }
@@ -877,11 +929,23 @@ fn firmware_brightness(mode: &LedMode, brightness: u8) -> u8 {
     if *mode == LedMode::Sync { 255 } else { brightness }
 }
 
+fn power_from_config(sync: &config::SyncConfig) -> Option<f32> {
+    if sync.light_compression { Some(sync.power_limit_pct as f32 / 100.0) } else { None }
+}
+
+/// Effective whole-strip budget: the configured one, further reduced by the brownout guard.
+fn effective_power_limit(base: Option<f32>, derate: f32) -> Option<f32> {
+    match base {
+        Some(f) => Some(f * derate),
+        None if derate < 1.0 => Some(derate),
+        None => None,
+    }
+}
+
 fn grade_from_config(sync: &config::SyncConfig) -> pipeline::Grade {
     pipeline::Grade {
         saturation_gain: sync.saturation,
         gamma: sync.gamma,
-        compression_limit: if sync.light_compression { Some(sync.compression_limit) } else { None },
         brightness: sync.brightness as f32 / 255.0,
         ..pipeline::Grade::default()
     }
