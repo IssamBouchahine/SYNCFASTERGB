@@ -53,6 +53,8 @@ The settings window has a button that removes everything the app stored on the P
 | `sync.brightness` | 0..255 software brightness |
 | `sync.saturation`, `sync.gamma` | Color grading |
 | `sync.attack_ms`, `sync.decay_ms`, `sync.deadband` | Smoothing |
+| `sync.edge_depth_pct` | How far in from the screen edge each LED looks, percent of the screen (3..40, default 12) |
+| `sync.skip_black_bars`, `sync.black_level` | Sample just inside letterbox/pillarbox black bars; lines darker than the level count as bars |
 | `sync.power_limit_pct` | Whole-strip power budget, percent of all-LEDs-white (default 40, max 80). Highlights can be full brightness; only the total is capped |
 
 ## Build

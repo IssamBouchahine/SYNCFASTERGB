@@ -762,7 +762,8 @@ impl SettingsGui {
         };
 
         card(ui, |ui| {
-            draw_layout_preview(ui, self.config.device.lamps_amount, self.config.sync.edge_number, source);
+            let depth = if self.tab == Tab::Sync && self.led_on { Some(self.config.sync.edge_depth_pct) } else { None };
+            draw_layout_preview(ui, self.config.device.lamps_amount, self.config.sync.edge_number, depth, source);
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new(caption).size(11.5).color(theme::MUTED));
             });
@@ -852,6 +853,41 @@ impl SettingsGui {
                 }
             });
             if changed {
+                self.save_and_apply(0.0);
+            }
+        });
+
+        // Detection area: how deep the LEDs look, and black-bar handling
+        section(ui, "Detection area", |ui| {
+            let mut ch = false;
+            let mut depth = self.config.sync.edge_depth_pct as f32;
+            if slider_row(ui, "Depth from the screen edge", &mut depth, 3.0, 40.0, " %", 0) {
+                self.config.sync.edge_depth_pct = depth.round() as u8;
+                ch = true;
+            }
+            ui.label(
+                egui::RichText::new(
+                    "How far into the picture each LED looks (the blue outline in the preview). Larger is smoother and \
+                     steadier; smaller follows the very edge more precisely.",
+                )
+                .size(11.5)
+                .color(theme::MUTED),
+            );
+            ui.add_space(4.0);
+            ch |= ui.checkbox(&mut self.config.sync.skip_black_bars, "Ignore black bars (letterboxed or pillarboxed video)").changed();
+            if self.config.sync.skip_black_bars {
+                let mut level = self.config.sync.black_level as f32;
+                if slider_row(ui, "Black level", &mut level, 2.0, 80.0, "", 0) {
+                    self.config.sync.black_level = level.round() as u8;
+                    ch = true;
+                }
+                ui.label(
+                    egui::RichText::new("Screen lines darker than this count as black bars and are skipped. Raise it if dark bars still dim the LEDs.")
+                        .size(11.5)
+                        .color(theme::MUTED),
+                );
+            }
+            if ch {
                 self.save_and_apply(0.0);
             }
         });
@@ -1369,7 +1405,7 @@ enum PreviewSource<'a> {
 }
 
 /// Monitor outline with the LED strip drawn around it, one dot per LED.
-fn draw_layout_preview(ui: &mut egui::Ui, lamps: u32, edges: u8, source: PreviewSource) {
+fn draw_layout_preview(ui: &mut egui::Ui, lamps: u32, edges: u8, depth_pct: Option<u8>, source: PreviewSource) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 170.0), egui::Sense::hover());
     let sw = (w * 0.66).min(340.0);
@@ -1387,6 +1423,14 @@ fn draw_layout_preview(ui: &mut egui::Ui, lamps: u32, edges: u8, source: Preview
     };
     ui.painter().rect_filled(screen, 8.0, tint);
     ui.painter().rect_stroke(screen, 8.0, egui::Stroke::new(1.5_f32, theme::BORDER));
+    // the area the LEDs actually look at: an inner outline `depth_pct` in from each edge
+    if let Some(d) = depth_pct {
+        let inset = egui::vec2(screen.width() * d as f32 / 100.0, screen.height() * d as f32 / 100.0);
+        let inner = egui::Rect::from_min_max(screen.min + inset, screen.max - inset);
+        if inner.width() > 4.0 && inner.height() > 4.0 {
+            ui.painter().rect_stroke(inner, 4.0, egui::Stroke::new(1.0_f32, theme::ACCENT.gamma_multiply(0.55)));
+        }
+    }
     ui.painter().line_segment(
         [egui::pos2(screen.center().x - 30.0, screen.bottom() + 14.0), egui::pos2(screen.center().x + 30.0, screen.bottom() + 14.0)],
         egui::Stroke::new(3.0_f32, theme::BORDER),

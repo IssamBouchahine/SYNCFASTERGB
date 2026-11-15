@@ -71,6 +71,15 @@ pub struct SyncConfig {
     /// `light_compression` is on). Highlights can reach full brightness; only the total is capped.
     #[serde(default = "default_power_limit_pct")]
     pub power_limit_pct: u8,
+    /// How far in from each screen edge the LEDs look, in percent of the screen size.
+    #[serde(default = "default_edge_depth_pct")]
+    pub edge_depth_pct: u8,
+    /// Sample just inside black bars (letterboxed / pillarboxed video) instead of on them.
+    #[serde(default = "default_true")]
+    pub skip_black_bars: bool,
+    /// A screen line darker than this (0..255) counts as part of a black bar.
+    #[serde(default = "default_black_level")]
+    pub black_level: u8,
 }
 
 /// LED 동작 모드
@@ -195,6 +204,8 @@ fn default_deadband() -> f32 { 2.0 }
 pub const MAX_POWER_LIMIT_PCT: u8 = 80;
 
 fn default_power_limit_pct() -> u8 { 40 }
+fn default_edge_depth_pct() -> u8 { 12 }
+fn default_black_level() -> u8 { 18 }
 fn default_true() -> bool { true }
 fn default_edge_number() -> u8 { 3 }
 fn default_255() -> u8 { 255 }
@@ -253,6 +264,8 @@ impl Config {
         // Hard ceiling: a laptop USB port cannot be asked for more than a fraction of the
         // strip's worst-case draw, whatever the config file says.
         s.power_limit_pct = s.power_limit_pct.clamp(10, MAX_POWER_LIMIT_PCT);
+        s.edge_depth_pct = s.edge_depth_pct.clamp(3, 40);
+        s.black_level = s.black_level.clamp(2, 80);
         if s.edge_number != 3 && s.edge_number != 4 {
             s.edge_number = 3;
         }
@@ -357,6 +370,9 @@ impl Default for SyncConfig {
             decay_ms: default_decay_ms(),
             deadband: default_deadband(),
             power_limit_pct: default_power_limit_pct(),
+            edge_depth_pct: default_edge_depth_pct(),
+            skip_black_bars: true,
+            black_level: default_black_level(),
         }
     }
 }
@@ -434,6 +450,21 @@ mod tests {
         assert_eq!(c.device.lamps_amount, 65);
         assert_eq!(c.capture.fps, 60);
         assert_eq!(c.capture.game_fps, 30);
+        assert_eq!(c.sync.edge_depth_pct, 12);
+        assert!(c.sync.skip_black_bars);
+        assert_eq!(c.sync.black_level, 18);
+    }
+
+    #[test]
+    fn detection_settings_are_clamped() {
+        let mut c: Config = toml::from_str("[sync]\nedge_depth_pct = 0\nblack_level = 255").unwrap();
+        c.sanitize();
+        assert_eq!(c.sync.edge_depth_pct, 3);
+        assert_eq!(c.sync.black_level, 80);
+        let mut c: Config = toml::from_str("[sync]\nedge_depth_pct = 200\nblack_level = 0").unwrap();
+        c.sanitize();
+        assert_eq!(c.sync.edge_depth_pct, 40);
+        assert_eq!(c.sync.black_level, 2);
     }
 
     #[test]
