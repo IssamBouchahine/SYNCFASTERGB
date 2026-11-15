@@ -82,7 +82,7 @@ pub struct SyncConfig {
     pub black_level: u8,
 }
 
-/// LED 동작 모드
+/// LED operating mode
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -96,7 +96,7 @@ pub enum LedMode {
 }
 
 
-/// 음악 반응 소스
+/// Sound-reactive source
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -107,7 +107,7 @@ pub enum RhythmSource {
 }
 
 
-/// UI 언어
+/// UI language
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -119,7 +119,7 @@ pub enum Language {
 }
 
 
-/// 소프트웨어 동적 효과 (단색)
+/// Software dynamic effect (single color)
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -377,7 +377,7 @@ impl Default for SyncConfig {
     }
 }
 
-// ── 자동 시작 (레지스트리) ──
+// ── Autostart (registry) ──
 
 const REG_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const REG_APPROVED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
@@ -391,10 +391,10 @@ pub fn set_autostart(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
 
     if enable {
         let exe = std::env::current_exe()?;
-        // Run 키에 등록
+        // Register under the Run key
         let run_key = hkcu.open_subkey_with_flags(REG_RUN_KEY, KEY_WRITE)?;
         run_key.set_value(REG_VALUE_NAME, &exe.to_string_lossy().as_ref())?;
-        // StartupApproved에 활성화 상태로 등록 (0x02 = enabled)
+        // Mark it enabled in StartupApproved (0x02 = enabled)
         if let Ok(approved_key) = hkcu.open_subkey_with_flags(REG_APPROVED_KEY, KEY_WRITE) {
             let enabled = winreg::RegValue {
                 vtype: RegType::REG_BINARY,
@@ -402,7 +402,7 @@ pub fn set_autostart(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
             };
             approved_key.set_raw_value(REG_VALUE_NAME, &enabled).ok();
         }
-        log::info!("자동 시작 등록 완료 (레지스트리 + StartupApproved)");
+        log::info!("autostart registered (Run key + StartupApproved)");
     } else {
         if let Ok(run_key) = hkcu.open_subkey_with_flags(REG_RUN_KEY, KEY_WRITE) {
             run_key.delete_value(REG_VALUE_NAME).ok();
@@ -410,10 +410,8 @@ pub fn set_autostart(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(approved_key) = hkcu.open_subkey_with_flags(REG_APPROVED_KEY, KEY_WRITE) {
             approved_key.delete_value(REG_VALUE_NAME).ok();
         }
-        log::info!("자동 시작 해제 완료");
+        log::info!("autostart removed");
     }
-
-    // 기존 Task Scheduler 항목 정리
 
     Ok(())
 }
@@ -428,11 +426,11 @@ pub fn is_autostart_enabled() -> bool {
         .is_ok();
     if !has_run { return false; }
 
-    // StartupApproved에서 비활성화(0x01) 여부 확인
+    // Check whether it was disabled (0x01) in StartupApproved
     if let Ok(approved) = hkcu.open_subkey(REG_APPROVED_KEY) {
         if let Ok(val) = approved.get_raw_value(REG_VALUE_NAME) {
             if !val.bytes.is_empty() && val.bytes[0] & 0x01 != 0 && val.bytes[0] & 0x02 == 0 {
-                return false; // 사용자가 작업 관리자에서 비활성화
+                return false; // the user disabled it in Task Manager
             }
         }
     }

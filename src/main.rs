@@ -1,4 +1,4 @@
-// 콘솔 창 숨기기 (--console 플래그로 표시 가능)
+// Hide the console window (show it with the --console flag)
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
@@ -32,7 +32,7 @@ use device::protocol::WireMap;
 use device::serial::DeviceConnection;
 
 fn main() {
-    // --console 플래그: 릴리즈에서도 콘솔 표시
+    // --console flag: show a console even in release builds
     if std::env::args().any(|a| matches!(a.as_str(), "--console" | "--list-monitors" | "--print-settings" | "--import-settings")) {
         unsafe { attach_console(); }
     }
@@ -70,9 +70,9 @@ fn main() {
 
     init_logging();
 
-    // panic=abort + 콘솔 없음 조합에서 패닉이 흔적 없이 사라지는 것 방지
+    // With panic=abort and no console a panic would vanish without a trace, so log it
     std::panic::set_hook(Box::new(|info| {
-        log::error!("패닉: {}", info);
+        log::error!("panic: {}", info);
     }));
 
     if std::env::args().any(|a| a == "--settings") {
@@ -98,14 +98,14 @@ fn main() {
 
     let locale = gui::detect_locale();
     let config = Config::load_or_default();
-    log::info!("설정: {:?}", config);
+    log::info!("settings: {:?}", config);
 
     let running = Arc::new(AtomicBool::new(true));
     let active = Arc::new(AtomicBool::new(true));
     let config_version = Arc::new(AtomicU32::new(0));
     let monitor_off = Arc::new(AtomicBool::new(false));
     let screen_black = Arc::new(AtomicBool::new(false));
-    // 절전·종료 전환 핸드셰이크: 리스너가 요청(suspend_pending) → sender 가 LED 끄고 핸들 해제(device_released)
+    // Sleep/shutdown handshake: the listener asks (suspend_pending), the sender turns the LEDs off and releases the handle (device_released)
     let suspend_pending = Arc::new(AtomicBool::new(false));
     let device_released = Arc::new(AtomicBool::new(false));
     let link_status = Arc::new(AtomicU8::new(LINK_SEARCHING));
@@ -123,7 +123,7 @@ fn main() {
         std::thread::Builder::new()
             .name("capture".into())
             .spawn(move || capture_loop(config, running, active, config_version, tx, screen_black))
-            .expect("캡처 스레드 생성 실패")
+            .expect("failed to start the capture thread")
     };
 
     let send_thread = {
@@ -138,12 +138,12 @@ fn main() {
         std::thread::Builder::new()
             .name("sender".into())
             .spawn(move || sender_loop(config, running, config_version, rx, monitor_off, screen_black, suspend_pending, device_released, link_status))
-            .expect("전송 스레드 생성 실패")
+            .expect("failed to start the sender thread")
     };
 
     run_tray(running.clone(), active, config_version, locale, link_status);
 
-    // 트레이 종료 후 스레드 정리 (정상 종료 경로)
+    // Stop the threads after the tray exits (normal shutdown path)
     running.store(false, Ordering::SeqCst);
     let _ = capture_thread.join();
     let _ = send_thread.join();
@@ -161,7 +161,7 @@ fn init_logging() {
     builder.init();
 }
 
-/// 릴리즈 빌드에서 콘솔 붙이기
+/// Attach a console in release builds
 #[allow(unused_unsafe)]
 unsafe fn attach_console() {
     #[cfg(not(debug_assertions))]
@@ -222,22 +222,22 @@ fn capture_loop(
     let mut mon_rect: Option<foreground::Rect4> = Some((first.origin.0, first.origin.1, first.origin.0 + first.width as i32, first.origin.1 + first.height as i32));
     let mut capturer: Option<ScreenCapture> = Some(first);
     let mut local_version = 0u32;
-    // 검정 화면 연속 프레임 카운터 (1초 이상 검정이면 플래그 설정)
+    // Counter of consecutive black frames (the flag is set after about a second)
     let mut black_frame_count = 0u32;
-    let mut black_threshold_frames = config.capture.fps; // ~1초
-    // 연속 에러 카운터 (누적 시 DXGI 재초기화)
+    let mut black_threshold_frames = config.capture.fps; // about 1 second
+    // Consecutive error counter (re-creates capture when it piles up)
     let mut consecutive_errors = 0u32;
-    // 마지막 전송 (정지 화면에서 스무딩 수렴 + keepalive)
+    // Last send (lets smoothing settle on a still screen, and drives the keepalive)
     let mut last_sent: Option<Vec<(u8, u8, u8)>> = None;
     let mut last_send_at = Instant::now();
     const KEEPALIVE: Duration = Duration::from_millis(500);
-    // 성능 통계 (로컬 로그 전용)
+    // Performance statistics (debug log only)
     let mut stat_cap = Duration::ZERO;
     let mut stat_ext = Duration::ZERO;
     let mut stat_frames = 0u32;
     let mut stat_since = Instant::now();
-    // 접근 손실(전체화면 독점 게임·보안 데스크톱)은 1초마다 반복된다 — 시작·복구만 남긴다
-    // (2026-10-14 로그: 5시간 동안 19,355회 반복돼 7.5MB)
+    // Access loss (exclusive full-screen games, secure desktop) can repeat every second: only the start and the recovery are logged
+    // (one earlier log grew to 7.5 MB with 19,355 repeats over 5 hours)
     let mut access_lost_since: Option<Instant> = None;
     let mut access_lost_reinits = 0u32;
     // The live picture for the settings window is shared only while that window is open.
@@ -379,7 +379,7 @@ fn capture_loop(
                     }
                 }
 
-                // 검정 화면 감지: 모든 LED 색상이 거의 검정인지 확인
+                // Black screen detection: are all LED colors nearly black?
                 const BLACK_SUM_THRESHOLD: u16 = 15;
                 if turn_off_on_black {
                     let is_black = colors.iter().all(|&(r, g, b)| {
@@ -389,7 +389,7 @@ fn capture_loop(
                         black_frame_count = black_frame_count.saturating_add(1);
                     } else {
                         if black_frame_count >= black_threshold_frames {
-                            log::info!("검정 화면 해제 — LED 복원");
+                            log::info!("black screen ended: restoring the LEDs");
                         }
                         black_frame_count = 0;
                     }
@@ -398,7 +398,7 @@ fn capture_loop(
                     if now_black != was_black {
                         screen_black.store(now_black, Ordering::SeqCst);
                         if now_black {
-                            log::info!("검정 화면 감지 — LED 끄기");
+                            log::info!("black screen detected: turning the LEDs off");
                         }
                     }
                 } else {
@@ -563,17 +563,17 @@ const LINK_SEARCHING: u8 = 0;
 const LINK_UP: u8 = 1;
 const LINK_HUNG: u8 = 2;
 
-/// 디바이스 링크 상태 (로그는 상태가 바뀔 때만 남긴다 — 2026-10-15 로그는 49초마다
-/// 5줄씩 재연결 스팸으로 1.5일 만에 회전돼 절전·복귀 시점의 증거가 날아갔다)
+/// Device link state (logged only when it changes: an earlier log was rotated away within 1.5 days
+/// by reconnect spam every 49 seconds, losing the evidence around sleep and resume)
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum LinkState {
-    /// 아직 연결 안 됨 / 버스에 없음
+    /// Not connected yet / not on the bus
     Absent,
-    /// 열거는 되지만 OUT 리포트를 NAK (hid_write 타임아웃) — 펌웨어 먹통
+    /// Enumerates but NAKs OUT reports (hid_write timeout): firmware hung
     Hung,
-    /// 연결됐고 getDeviceInfo 응답도 받음
+    /// Connected and answered getDeviceInfo
     Up,
-    /// 연결됐지만 getDeviceInfo 무응답 — 응답 경로만 죽은 반먹통(스트리밍은 가능)
+    /// Connected but getDeviceInfo got no reply: only the reply path is dead (streaming works)
     Deaf,
 }
 
@@ -646,9 +646,9 @@ fn sender_loop(
     let mut send_count = 0u64;
     let mut blanked_by_screen = false;
 
-    // 컴퓨터 리듬용 오디오 미터 (필요 시 초기화)
+    // Audio meter for computer rhythm (created on demand)
     let mut audio_meter: Option<audio::AudioMeter> = None;
-    // 소프트웨어 효과 타이머
+    // Software effect timer
     let mut soft_tick: f64 = 0.0;
 
     while running.load(Ordering::Relaxed) {
@@ -663,14 +663,14 @@ fn sender_loop(
             Ordering::Relaxed,
         );
 
-        // ── 절전 진입 / 세션 종료 예고: LED 끄고 핸들을 놓은 뒤 복귀까지 대기 ──
-        // 디바이스는 5VSB로 PC가 꺼져도 전원이 유지돼 마지막 상태로 계속 빛난다.
-        // 전환 중에 먹통이 되더라도 "꺼진 상태"로 멈추도록, 전환 전에 반드시 끈다.
+        // ── Sleep entry / session end notice: turn the LEDs off, release the handle, wait for resume ──
+        // The device stays powered from 5VSB even when the PC is off and keeps glowing in its last state.
+        // So that it stops "off" even if it hangs during the transition, always turn it off first.
         if suspend_pending.load(Ordering::SeqCst) {
             if let Some(c) = conn.take() {
-                log::info!("절전/종료 전환 — LED 끄고 HID 핸들 해제");
+                log::info!("sleep/shutdown transition: turning the LEDs off and releasing the HID handle");
                 if let Err(e) = c.turn_off() {
-                    log::warn!("전환 전 LED 끄기 실패: {}", e);
+                    log::warn!("could not turn the LEDs off before the transition: {}", e);
                 }
                 blanked_by_screen = false;
                 link = LinkState::Absent;
@@ -678,12 +678,12 @@ fn sender_loop(
             device_released.store(true, Ordering::SeqCst);
             while rx.try_recv().is_ok() {}
             std::thread::sleep(Duration::from_millis(100));
-            // 복귀 직후 USB 재열거가 끝날 시간을 준다
+            // Give USB re-enumeration time to finish right after resume
             next_connect_at = Instant::now() + Duration::from_secs(2);
             continue;
         }
 
-        // ── 연결 보장 (백오프) ──
+        // ── Make sure we are connected (with backoff) ──
         if conn.is_none() {
             if Instant::now() < next_connect_at {
                 while rx.try_recv().is_ok() {}
@@ -693,7 +693,7 @@ fn sender_loop(
             match DeviceConnection::connect(&config.device.com_port) {
                 Ok(mut c) => {
                     let responded = c.init_device().unwrap_or(false);
-                    if let Err(e) = c.set_brightness(firmware_brightness(&current_mode, brightness)) { log::warn!("밝기 실패: {}", e); }
+                    if let Err(e) = c.set_brightness(firmware_brightness(&current_mode, brightness)) { log::warn!("setting brightness failed: {}", e); }
                     if responded {
                         log::info!("strip connected (MAC={:02x?})", c.mac);
                         link = LinkState::Up;
@@ -754,8 +754,8 @@ fn sender_loop(
                 effect_cfg = c.effect.clone();
                 if let Some(d) = conn.as_ref() {
                     if !apply_mode(d, &effect_cfg, lamps_amount) {
-                        // 모드 적용 실패 → 다음 루프에서 재연결
-                        log::warn!("모드 적용 실패 — 디바이스 재연결");
+                        // Applying the mode failed: reconnect on the next loop
+                        log::warn!("applying the mode failed: reconnecting");
                         conn = None;
                         next_connect_at = Instant::now() + Duration::from_secs(1);
                         continue;
@@ -765,12 +765,12 @@ fn sender_loop(
             }
         }
 
-        // 모니터 절전 또는 검정 화면 시 LED 끄기
+        // Turn the LEDs off while the monitor sleeps or the screen is black
         let should_blank = (turn_off_on_sleep && monitor_off.load(Ordering::Relaxed))
             || (turn_off_on_black && screen_black.load(Ordering::Relaxed));
         if should_blank {
             if !blanked_by_screen {
-                log::info!("화면 꺼짐 감지 — LED 끄기");
+                log::info!("screen off detected: turning the LEDs off");
                 if let Some(d) = conn.as_ref() {
                     if let Err(e) = d.turn_off() {
                         handle_write_failure(e.as_ref(), &mut conn, &mut link, &mut next_connect_at);
@@ -783,7 +783,7 @@ fn sender_loop(
             std::thread::sleep(Duration::from_millis(200));
             continue;
         } else if blanked_by_screen {
-            log::info!("화면 복귀 — LED 복원");
+            log::info!("screen back: restoring the LEDs");
             blanked_by_screen = false;
             if let Some(d) = conn.as_ref() {
                 let _ = d.set_brightness(firmware_brightness(&current_mode, brightness));
@@ -791,7 +791,7 @@ fn sender_loop(
             }
         }
 
-        // 이 아래는 연결이 있어야 한다
+        // Everything below needs a connection
         let d = match conn.as_ref() {
             Some(d) => d,
             None => continue,
@@ -828,7 +828,7 @@ fn sender_loop(
                     }
 
                     if send_count == 0 {
-                        log::info!("첫 SC 패킷: {}LED, {}바이트", color_data.len() / 5, color_data.len());
+                        log::info!("first SC packet: {} LEDs, {} bytes", color_data.len() / 5, color_data.len());
                     }
                     send_count += 1;
 
@@ -855,11 +855,11 @@ fn sender_loop(
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         } else if current_mode == LedMode::Sound && effect_cfg.rhythm_source == RhythmSource::Computer {
-            // 컴퓨터 리듬: 오디오 볼륨 → setComputerRhythm 반복
+            // Computer rhythm: audio volume, sent repeatedly with setComputerRhythm
             if audio_meter.is_none() {
                 audio_meter = audio::AudioMeter::new().ok();
                 if audio_meter.is_none() {
-                    log::warn!("오디오 미터 초기화 실패");
+                    log::warn!("audio meter could not be started");
                 }
             }
             if let Some(ref mut meter) = audio_meter {
@@ -873,20 +873,20 @@ fn sender_loop(
             std::thread::sleep(Duration::from_millis(40));
             continue;
         } else if current_mode == LedMode::Static && effect_cfg.soft_effect != SoftEffect::None {
-            // 소프트웨어 동적 효과 (단색 숨쉬기/회전)
+            // Software dynamic effects (single-color breathing / rotation)
             soft_tick += 0.05;
             let speed_factor = effect_cfg.effect_speed as f64 / 50.0;
             let t = soft_tick * speed_factor;
 
             let result = match effect_cfg.soft_effect {
                 SoftEffect::Breathe => {
-                    // 사인파로 밝기 변화 (0.05 ~ 1.0)
+                    // Sine-wave brightness (0.05 to 1.0)
                     let bright = ((t.sin() + 1.0) / 2.0 * 0.95 + 0.05) as f32;
                     let r = (effect_cfg.color_r as f32 * bright) as u8;
                     let g = (effect_cfg.color_g as f32 * bright) as u8;
                     let b = (effect_cfg.color_b as f32 * bright) as u8;
-                    // setSectionLED(0x86)는 단발성 색 변경 명령 — 33Hz 연사 시 펌웨어 먹통 위험.
-                    // Rotate와 동일하게 스트리밍 전용 SC(setSyncScreen) 경로로 전송한다.
+                    // setSectionLED (0x86) is a one-shot color command: sending it at 33 Hz risks hanging the firmware.
+                    // Like Rotate, send through the streaming-only SC (setSyncScreen) path.
                     let mapped = wire_map.apply(r, g, b);
                     let n = lamps_amount as usize;
                     let mut data = Vec::with_capacity(n * 5);
@@ -901,7 +901,7 @@ fn sender_loop(
                     d.set_sync_screen(&data)
                 }
                 SoftEffect::Rotate => {
-                    // LED 위치별 그라데이션 회전
+                    // Rotating gradient by LED position
                     let n = lamps_amount as usize;
                     let mut data = Vec::with_capacity(n * 5);
                     for i in 0..n {
@@ -930,7 +930,7 @@ fn sender_loop(
             std::thread::sleep(Duration::from_millis(30));
             continue;
         } else {
-            // 하드웨어 동적/음악/단색/끄기 — 별도 루프 불필요
+            // Hardware dynamic / sound / static / off modes need no loop
             std::thread::sleep(Duration::from_millis(200));
             while rx.try_recv().is_ok() {}
             continue;
@@ -943,7 +943,7 @@ fn sender_loop(
     }
 
     if let Some(c) = conn.take() {
-        log::info!("앱 종료 — LED 끄기");
+        log::info!("app exiting: turning the LEDs off");
         let _ = c.turn_off();
     }
     device_released.store(true, Ordering::SeqCst);
@@ -960,32 +960,32 @@ fn effect_cfg_changed(a: &config::EffectConfig, b: &config::EffectConfig) -> boo
         || a.soft_effect != b.soft_effect
 }
 
-/// 모드 적용. 성공 시 true, 실패 시 false 반환.
+/// Apply a mode. Returns true on success, false on failure.
 fn apply_mode(conn: &DeviceConnection, effect: &config::EffectConfig, lamps_amount: u32) -> bool {
-    log::info!("모드 적용: {:?}", effect.mode);
+    log::info!("mode applied: {:?}", effect.mode);
     let result = match effect.mode {
         LedMode::Sync => {
-            // 동기화 모드: 별도 명령 불필요, sender_loop이 SC 패킷 전송
+            // Sync mode: no command needed, sender_loop streams SC packets
             Ok(())
         }
         LedMode::Dynamic => {
-            // 원본 흐름: setSectionLED → setLedEffect(2=동적, index)
+            // Sequence: setSectionLED, then setLedEffect(2 = dynamic, index)
             conn.set_section_led(0, 0, 0, lamps_amount).ok();
             std::thread::sleep(Duration::from_millis(20));
             if let Err(e) = conn.set_led_effect(2, effect.dynamic_index) {
-                log::warn!("동적 효과 설정 실패: {}", e);
+                log::warn!("setting the dynamic effect failed: {}", e);
             }
             std::thread::sleep(Duration::from_millis(80));
             conn.set_dynamic_speed(effect.effect_speed)
         }
         LedMode::Sound => {
-            // 원본 흐름: setSectionLED → setLedEffect(3=음악, index)
+            // Sequence: setSectionLED, then setLedEffect(3 = sound, index)
             conn.set_section_led(0, 0, 0, lamps_amount).ok();
             std::thread::sleep(Duration::from_millis(20));
             conn.set_led_effect(3, effect.sound_index)
         }
         LedMode::Static => {
-            // setSectionLED로 단색 전송
+            // Send a single color with setSectionLED
             conn.set_section_led(effect.color_r, effect.color_g, effect.color_b, lamps_amount)
         }
         LedMode::Off => {
@@ -995,7 +995,7 @@ fn apply_mode(conn: &DeviceConnection, effect: &config::EffectConfig, lamps_amou
     match result {
         Ok(()) => true,
         Err(e) => {
-            log::warn!("모드 적용 실패: {}", e);
+            log::warn!("applying the mode failed: {}", e);
             false
         }
     }
@@ -1031,7 +1031,7 @@ fn grade_from_config(sync: &config::SyncConfig) -> pipeline::Grade {
 fn create_rgb_tray_icon() -> Icon {
     let size = 32u32;
     let rgba = gui::generate_rgb_icon(size);
-    Icon::from_rgba(rgba, size, size).expect("아이콘 생성 실패")
+    Icon::from_rgba(rgba, size, size).expect("failed to create the icon")
 }
 
 fn create_gray_tray_icon() -> Icon {
@@ -1044,40 +1044,40 @@ fn create_gray_tray_icon() -> Icon {
             [lum, lum, lum, px[3] / 2]
         })
         .collect();
-    Icon::from_rgba(gray, size, size).expect("아이콘 생성 실패")
+    Icon::from_rgba(gray, size, size).expect("failed to create the icon")
 }
 
-// ── Windows 종료·절전 감지 (WM_QUERYENDSESSION / WM_ENDSESSION / PBT_APMSUSPEND) ──
+// ── Windows shutdown / sleep detection (WM_QUERYENDSESSION / WM_ENDSESSION / PBT_APMSUSPEND) ──
 //
-// 전환 전에 sender 스레드가 LED를 끄고 HID 핸들을 놓았는지를 핸드셰이크로 확인한다.
-// 이전 구현은 WM_ENDSESSION에서 800ms 잠들고 끝이라, sender 가 쓰기 타임아웃(1초)에
-// 걸려 있으면 끄기 명령이 나가기 전에 프로세스가 죽었다(2026-10-16 02:04 로그에 종료 기록 없음).
+// A handshake confirms that the sender thread turned the LEDs off and released the HID handle before the transition.
+// An earlier version just slept 800 ms in WM_ENDSESSION, so when the sender was stuck in a write timeout (1 s)
+// the process died before the off command went out (that shutdown left no exit entry in the log).
 
 static SHUTDOWN_FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static MONITOR_OFF_FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static SUSPEND_FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static RELEASED_FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
-/// sender 에게 "LED 끄고 핸들 놓아라"를 요청하고 완료(또는 시한)까지 기다린다.
+/// Ask the sender to turn the LEDs off and release the handle, then wait for it (or the deadline).
 fn request_device_release(reason: &str, max_wait: Duration) {
     let (Some(suspend), Some(released)) = (SUSPEND_FLAG.get(), RELEASED_FLAG.get()) else { return; };
-    log::info!("{} — LED 끄기 요청", reason);
+    log::info!("{}: requesting LED off", reason);
     suspend.store(true, Ordering::SeqCst);
     let start = Instant::now();
     while !released.load(Ordering::SeqCst) && start.elapsed() < max_wait {
         std::thread::sleep(Duration::from_millis(20));
     }
     if released.load(Ordering::SeqCst) {
-        log::info!("{} — LED 끄기 완료 ({}ms)", reason, start.elapsed().as_millis());
+        log::info!("{}: LED off done ({} ms)", reason, start.elapsed().as_millis());
     } else {
-        log::warn!("{} — LED 끄기 미완료 (시한 {}ms 초과)", reason, max_wait.as_millis());
+        log::warn!("{}: LED off not completed (deadline of {} ms exceeded)", reason, max_wait.as_millis());
     }
 }
 
 fn resume_device(reason: &str) {
     if let Some(suspend) = SUSPEND_FLAG.get() {
         if suspend.swap(false, Ordering::SeqCst) {
-            log::info!("{} — 디바이스 재연결 예정", reason);
+            log::info!("{}: the device will reconnect", reason);
         }
     }
 }
@@ -1102,7 +1102,7 @@ fn spawn_shutdown_listener(
             use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
             use windows::Win32::Foundation::HANDLE;
 
-            // 종료 알림을 다른 앱보다 먼저 받아 LED 끄기 시간을 확보한다 (0x3FF = 최우선)
+            // Receive the shutdown notice before other apps to get time to turn the LEDs off (0x3FF = highest priority)
             let _ = SetProcessShutdownParameters(0x3FF, SHUTDOWN_NORETRY);
 
             let class_name = windows::core::w!("SYNCFASTERGB_Shutdown");
@@ -1113,7 +1113,7 @@ fn spawn_shutdown_listener(
             };
             RegisterClassW(&wc);
 
-            // 숨겨진 top-level 윈도우 (WM_ENDSESSION + 전원 알림 수신용)
+            // Hidden top-level window (receives WM_ENDSESSION and power notifications)
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(0), class_name,
                 windows::core::w!(""), WINDOW_STYLE(0),
@@ -1121,7 +1121,7 @@ fn spawn_shutdown_listener(
                 None, None, None, None,
             );
 
-            // 모니터 전원 상태 변경 알림 등록
+            // Register for monitor power state changes
             if let Ok(hwnd) = hwnd {
                 let _ = RegisterPowerSettingNotification(
                     HANDLE(hwnd.0 as _), &GUID_CONSOLE_DISPLAY_STATE,
@@ -1149,20 +1149,20 @@ unsafe extern "system" fn shutdown_wnd_proc(
 
     match msg {
         WM_QUERYENDSESSION => {
-            // 응답 시한 5초 안에 끄기를 끝낸다 (정상 디바이스 ~0.7초, 먹통이면 쓰기 타임아웃 1초+)
-            request_device_release("세션 종료 예고", Duration::from_millis(3000));
+            // Finish within the 5-second deadline (a healthy device takes ~0.7 s, a hung one 1 s+ for the write timeout)
+            request_device_release("session end notice", Duration::from_millis(3000));
             LRESULT(1)
         }
         WM_ENDSESSION => {
             if wparam.0 != 0 {
-                // QUERY 를 못 받은 경로(ENDSESSION_CRITICAL 등) 대비 한 번 더
-                request_device_release("세션 종료", Duration::from_millis(2000));
+                // One more time, for paths where QUERY was not received (ENDSESSION_CRITICAL etc.)
+                request_device_release("session end", Duration::from_millis(2000));
                 if let Some(running) = SHUTDOWN_FLAG.get() {
                     running.store(false, Ordering::SeqCst);
                 }
             } else {
-                // 다른 앱이 종료를 막아 취소됨
-                resume_device("세션 종료 취소");
+                // Cancelled because another app blocked the shutdown
+                resume_device("session end cancelled");
             }
             LRESULT(0)
         }
@@ -1171,21 +1171,21 @@ unsafe extern "system" fn shutdown_wnd_proc(
             use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
             match wparam.0 {
                 PBT_APMSUSPEND => {
-                    // 앱에 주어지는 시간은 약 2초
-                    request_device_release("절전 진입", Duration::from_millis(1800));
+                    // The app gets about 2 seconds
+                    request_device_release("entering sleep", Duration::from_millis(1800));
                 }
                 PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
-                    resume_device("절전 복귀");
+                    resume_device("resuming from sleep");
                 }
                 PBT_POWERSETTINGCHANGE if lparam.0 != 0 => {
                     let setting = &*(lparam.0 as *const POWERBROADCAST_SETTING);
                     if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE {
                         let state = setting.Data[0];
                         if let Some(flag) = MONITOR_OFF_FLAG.get() {
-                            // 0 = 꺼짐, 1 = 켜짐, 2 = 어두워짐
+                            // 0 = off, 1 = on, 2 = dimmed
                             flag.store(state == 0, Ordering::SeqCst);
-                            log::info!("모니터 전원 상태: {}", match state {
-                                0 => "꺼짐", 1 => "켜짐", _ => "어두워짐"
+                            log::info!("monitor power state: {}", match state {
+                                0 => "off", 1 => "on", _ => "dimmed"
                             });
                         }
                     }
@@ -1199,7 +1199,7 @@ unsafe extern "system" fn shutdown_wnd_proc(
 }
 
 fn run_tray(running: Arc<AtomicBool>, active: Arc<AtomicBool>, config_version: Arc<AtomicU32>, locale: &'static gui::Locale, link_status: Arc<AtomicU8>) {
-    let event_loop = EventLoop::new().expect("이벤트 루프 생성 실패");
+    let event_loop = EventLoop::new().expect("failed to create the event loop");
     let mut app = TrayApp {
         running, active, config_version,
         last_revision: Config::revision(), tick_counter: 0,
@@ -1244,7 +1244,7 @@ impl ApplicationHandler for TrayApp {
             .with_menu_on_left_click(false)
             .with_menu(Box::new(menu))
             .build()
-            .expect("트레이 아이콘 생성 실패");
+            .expect("failed to create the tray icon");
 
         self.toggle_item = Some(toggle);
         self.settings_item = Some(settings);

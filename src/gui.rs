@@ -8,7 +8,7 @@ use eframe::egui::Color32;
 
 const WIRE_MAPS: &[&str] = &["RGB", "RBG", "GRB", "GBR", "BRG", "BGR"];
 
-// ── 다국어 (Locale) ──
+// ── Localisation ──
 
 pub struct Locale {
     pub tab_sync: &'static str,
@@ -269,7 +269,7 @@ pub fn open_settings() {
     }
 }
 
-/// RGB 스펙트럼 링 아이콘 RGBA 데이터 생성
+/// Generate RGBA data for the RGB spectrum ring icon
 pub fn generate_rgb_icon(size: u32) -> Vec<u8> {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let c = size as f32 / 2.0;
@@ -333,7 +333,7 @@ fn icon_hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
     )
 }
 
-/// --settings 모드 진입점
+/// Entry point of --settings mode
 pub fn run_settings_window() {
     // One settings window per session: a second launch just focuses the first.
     let Some(_settings_guard) = crate::single::acquire(crate::single::SETTINGS_MUTEX) else {
@@ -378,7 +378,7 @@ fn setup_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-// ── 테마 ──
+// ── Theme ──
 
 mod theme {
     use eframe::egui::Color32;
@@ -430,7 +430,7 @@ impl Color32X {
     const HOVER: Color32 = Color32::from_rgb(36, 44, 62);
 }
 
-// ── 모드 탭 ──
+// ── Mode tabs ──
 
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
@@ -461,7 +461,7 @@ impl Tab {
     }
 }
 
-// ── GUI 상태 ──
+// ── GUI state ──
 
 /// Minimum seconds between config writes while a slider is being dragged.
 const SAVE_DEBOUNCE: f64 = 0.25;
@@ -678,7 +678,7 @@ impl SettingsGui {
     }
 }
 
-// ── eframe 메인 루프 ──
+// ── eframe main loop ──
 
 impl eframe::App for SettingsGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -695,7 +695,7 @@ impl eframe::App for SettingsGui {
                     self.draw_hero_card(ui);
                     ui.add_space(14.0);
 
-                    // ── 모드 선택 ──
+                    // ── Mode selector ──
                     let labels = [locale.tab_sync, locale.tab_dynamic, locale.tab_sound, locale.tab_static];
                     let current = match self.tab {
                         Tab::Sync => 0,
@@ -756,7 +756,7 @@ impl eframe::App for SettingsGui {
                         self.draw_settings_section(ui);
                     }
 
-                    // ── 상태 메시지 ──
+                    // ── Status message ──
                     ui.add_space(10.0);
                     if !self.status_msg.is_empty() {
                         let elapsed = ctx.input(|i| i.time) - self.status_time;
@@ -773,12 +773,12 @@ impl eframe::App for SettingsGui {
     }
 }
 
-// ── 헤더 / 밝기 ──
+// ── Header / brightness ──
 
 impl SettingsGui {
     fn draw_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            // 스펙트럼 링 로고
+            // Spectrum ring logo
             let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
             let c = rect.center();
             let segments = 36;
@@ -880,13 +880,13 @@ impl SettingsGui {
     }
 }
 
-// ── 각 탭 UI ──
+// ── Per-tab UI ──
 
 impl SettingsGui {
     fn draw_sync_tab(&mut self, ui: &mut egui::Ui) {
         let locale = self.locale;
 
-        // 모니터 선택
+        // Monitor selection
         section(ui, locale.monitor_label.trim_end_matches(':'), |ui| {
             let selected_text = self.monitor_label_text();
             ui.horizontal(|ui| {
@@ -928,7 +928,7 @@ impl SettingsGui {
             });
         });
 
-        // LED 배치 미리보기 + 방향/엣지
+        // LED layout: direction and edges
         section(ui, locale.led_layout, |ui| {
             let mut changed = false;
             ui.horizontal(|ui| {
@@ -988,7 +988,7 @@ impl SettingsGui {
             }
         });
 
-        // 반응성
+        // Responsiveness
         section(ui, locale.sync_speed, |ui| {
             let presets = [
                 (0u32, locale.speed_fastest),
@@ -1016,7 +1016,7 @@ impl SettingsGui {
             }
         });
 
-        // 색상
+        // Color
         section(ui, locale.color_processing, |ui| {
             let mut ch = false;
             ch |= slider_row(ui, locale.saturation.trim_end_matches(':'), &mut self.config.sync.saturation, 0.0, 3.0, "", 2);
@@ -1109,7 +1109,7 @@ impl SettingsGui {
         let locale = self.locale;
         let e = &mut self.config.effect;
 
-        // 색상 미리보기
+        // Color preview
         let w = ui.available_width();
         let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 64.0), egui::Sense::hover());
         let color = Color32::from_rgb(e.color_r, e.color_g, e.color_b);
@@ -1429,7 +1429,7 @@ impl SettingsGui {
     }
 }
 
-// ── 위젯 ──
+// ── Widgets ──
 
 fn short_gpu(name: &str) -> String {
     name.replace("(R)", "").replace("NVIDIA GeForce ", "").replace("Graphics", "").replace("  ", " ").trim().to_string()

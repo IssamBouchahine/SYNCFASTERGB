@@ -3,13 +3,13 @@ fn main() {
     let ico_path = format!("{}/app.ico", out_dir);
 
     let sizes: &[u32] = &[16, 32, 48, 256];
-    std::fs::write(&ico_path, generate_ico(sizes)).expect("ICO 생성 실패");
+    std::fs::write(&ico_path, generate_ico(sizes)).expect("failed to generate the icon");
 
     let mut res = winresource::WindowsResource::new();
     res.set_icon(&ico_path);
     res.set("ProductName", "SYNCFASTERGB");
     res.set("FileDescription", "SYNCFASTERGB screen-sync LED controller");
-    res.compile().expect("리소스 컴파일 실패");
+    res.compile().expect("failed to compile resources");
 }
 
 fn generate_ico(sizes: &[u32]) -> Vec<u8> {

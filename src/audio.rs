@@ -1,6 +1,6 @@
-//! Windows WASAPI 오디오 피크 미터
-//! IAudioMeterInformation으로 시스템 출력 볼륨 레벨을 읽음 (0.0 ~ 1.0)
-//! 원본 SyncLight와 동일: 노이즈 게이트(≤0.01→0), 스무딩 없이 원시값 전송
+//! Windows WASAPI audio peak meter
+//! Reads the system output level (0.0 to 1.0) through IAudioMeterInformation
+//! Noise gate (at most 0.01 becomes 0), raw value, no smoothing
 
 use windows::Win32::Media::Audio::{
     eRender, eConsole,
@@ -30,8 +30,8 @@ impl AudioMeter {
         }
     }
 
-    /// 피크 레벨 → 0~100 정수 (원본 SyncLight 동일 로직)
-    /// 노이즈 게이트: ≤0.01 → 0, 그 외 raw * 100
+    /// Peak level to an integer 0-100
+    /// Noise gate: at most 0.01 gives 0, otherwise raw * 100
     pub fn peak_volume(&mut self) -> u8 {
         let raw = unsafe {
             self.meter.GetPeakValue().unwrap_or(0.0)
