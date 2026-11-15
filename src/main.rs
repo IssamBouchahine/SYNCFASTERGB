@@ -24,6 +24,7 @@ use winit::window::WindowId;
 
 use capture::dxgi::{CaptureError, ScreenCapture};
 use color::extractor::ColorExtractor;
+use color::pipeline;
 use config::{Config, LedMode, RhythmSource, SoftEffect};
 use device::protocol::WireMap;
 use device::serial::DeviceConnection;
@@ -156,16 +157,7 @@ fn capture_loop(
         }
     };
 
-    let mut extractor = ColorExtractor::new(
-        config.device.lamps_amount,
-        config.capture.sample_width,
-        config.sync.gamma,
-        config.sync.saturation,
-        config.sync.light_compression,
-        config.sync.smoothing,
-        config.sync.reverse,
-        config.sync.edge_number,
-    );
+    let mut extractor = ColorExtractor::new(config.device.lamps_amount, &config.sync);
 
     log::info!("캡처 스레드 시작 ({}fps, {}x{})", config.capture.fps, capturer.width, capturer.height);
     let mut local_version = 0u32;
@@ -189,10 +181,7 @@ fn capture_loop(
             frame_interval = Duration::from_millis(1000 / c.capture.fps as u64);
             turn_off_on_black = c.app.turn_off_on_black;
             black_threshold_frames = c.capture.fps;
-            extractor.update_config(
-                c.device.lamps_amount, c.sync.gamma, c.sync.saturation,
-                c.sync.light_compression, c.sync.smoothing, c.sync.reverse, c.sync.edge_number,
-            );
+            extractor.update_config(c.device.lamps_amount, &c.sync);
         }
 
         if !active.load(Ordering::Relaxed) {
@@ -338,8 +327,7 @@ fn sender_loop(
     let mut wire_map = WireMap::from_str(&config.device.wire_map);
     let mut send_interval = Duration::from_millis(config.sync.interval_ms());
     let mut brightness = config.sync.brightness;
-    let mut saturation_on = config.sync.saturation > 0.0;
-    let mut light_compression = config.sync.light_compression;
+    let mut grade_params = grade_from_config(&config.sync);
     let mut current_mode = config.effect.mode.clone();
     let mut effect_cfg = config.effect.clone();
     let mut turn_off_on_sleep = config.app.turn_off_on_sleep;
@@ -442,8 +430,7 @@ fn sender_loop(
             let c = Config::load_or_default();
             wire_map = WireMap::from_str(&c.device.wire_map);
             send_interval = Duration::from_millis(c.sync.interval_ms());
-            saturation_on = c.sync.saturation > 0.0;
-            light_compression = c.sync.light_compression;
+            grade_params = grade_from_config(&c.sync);
 
             if brightness != c.sync.brightness {
                 brightness = c.sync.brightness;
@@ -507,16 +494,15 @@ fn sender_loop(
                 Ok(colors) => {
                     let mut color_data = Vec::with_capacity(colors.len() * 5);
                     for (i, &(r, g, b)) in colors.iter().enumerate() {
-                        let mapped = wire_map.apply(r, g, b);
-                        let (cr, cg, cb) = convert_to_black(mapped[0], mapped[1], mapped[2], 20);
+                        let graded = pipeline::grade([r, g, b], &grade_params);
+                        let wired = wire_map.apply(graded[0], graded[1], graded[2]);
                         let idx = (i + 1) as u8;
                         color_data.push(idx);
-                        color_data.push(cr);
-                        color_data.push(cg);
-                        color_data.push(cb);
+                        color_data.push(wired[0]);
+                        color_data.push(wired[1]);
+                        color_data.push(wired[2]);
                         color_data.push(idx);
                     }
-                    low_light_for_sync(&mut color_data, saturation_on, light_compression);
 
                     if send_count == 0 {
                         log::info!("첫 SC 패킷: {}LED, {}바이트", color_data.len() / 5, color_data.len());
@@ -678,92 +664,12 @@ fn apply_mode(conn: &DeviceConnection, effect: &config::EffectConfig, lamps_amou
     }
 }
 
-fn convert_to_black(r: u8, g: u8, b: u8, threshold: u8) -> (u8, u8, u8) {
-    if r <= threshold && g <= threshold && b <= threshold {
-        return (0, 0, 0);
-    }
-    let mut out = [r, g, b];
-    let mut dominant = None;
-    let mut weak_count = 0u8;
-    let mut weak = [false; 3];
-    for (i, &v) in out.iter().enumerate() {
-        if v >= 200 { dominant = Some(i); }
-        if v <= 50 { weak[i] = true; weak_count += 1; }
-    }
-    if let Some(d) = dominant {
-        if weak_count == 2 {
-            out[d] = ((out[d] as u16 * 3) / 2).min(255) as u8;
-            for i in 0..3 {
-                if weak[i] { out[i] = 0; }
-            }
-        }
-    }
-    (out[0], out[1], out[2])
-}
-
-fn boost_saturation_3x(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
-    let (rf, gf, bf) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-    let max = rf.max(gf).max(bf);
-    let min = rf.min(gf).min(bf);
-    let l = (max + min) / 2.0;
-    if (max - min).abs() < 0.001 { return (r, g, b); }
-
-    let delta = max - min;
-    let s = if l > 0.5 { delta / (2.0 - max - min) } else { delta / (max + min) };
-    let mut h = if (max - rf).abs() < 0.001 {
-        (gf - bf) / delta + if gf < bf { 6.0 } else { 0.0 }
-    } else if (max - gf).abs() < 0.001 {
-        (bf - rf) / delta + 2.0
-    } else {
-        (rf - gf) / delta + 4.0
-    };
-    h /= 6.0;
-    let new_s = (s * 3.0).min(1.0);
-
-    let hue_to_rgb = |p: f32, q: f32, mut t: f32| -> f32 {
-        if t < 0.0 { t += 1.0; }
-        if t > 1.0 { t -= 1.0; }
-        if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
-        if t < 0.5 { return q; }
-        if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
-        p
-    };
-
-    let (ro, go, bo) = if new_s.abs() < 0.001 { (l, l, l) } else {
-        let q = if l < 0.5 { l * (1.0 + new_s) } else { l + new_s - l * new_s };
-        let p = 2.0 * l - q;
-        (hue_to_rgb(p, q, h + 1.0/3.0), hue_to_rgb(p, q, h), hue_to_rgb(p, q, h - 1.0/3.0))
-    };
-
-    (
-        (ro * 255.0).round().clamp(0.0, 255.0) as u8,
-        (go * 255.0).round().clamp(0.0, 255.0) as u8,
-        (bo * 255.0).round().clamp(0.0, 255.0) as u8,
-    )
-}
-
-fn low_light_for_sync(data: &mut [u8], saturation: bool, compression: bool) {
-    let mut i = 0;
-    while i + 4 < data.len() {
-        let orig_r = data[i + 1];
-        let orig_g = data[i + 2];
-        let orig_b = data[i + 3];
-
-        if saturation {
-            let (sr, sg, sb) = boost_saturation_3x(orig_r, orig_g, orig_b);
-            data[i + 1] = sr;
-            data[i + 2] = sg;
-            data[i + 3] = sb;
-        }
-
-        let orig_sum = orig_r as u16 + orig_g as u16 + orig_b as u16;
-        if compression && orig_sum > 255 {
-            let ratio = orig_sum as f32 / 255.0;
-            data[i + 1] = (orig_r as f32 / ratio) as u8;
-            data[i + 2] = (orig_g as f32 / ratio) as u8;
-            data[i + 3] = (orig_b as f32 / ratio) as u8;
-        }
-        i += 5;
+fn grade_from_config(sync: &config::SyncConfig) -> pipeline::Grade {
+    pipeline::Grade {
+        saturation_gain: sync.saturation,
+        gamma: sync.gamma,
+        compression_limit: if sync.light_compression { Some(sync.compression_limit) } else { None },
+        ..pipeline::Grade::default()
     }
 }
 

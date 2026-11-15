@@ -52,6 +52,18 @@ pub struct SyncConfig {
     pub reverse: bool,
     #[serde(default = "default_edge_number")]
     pub edge_number: u8,
+    /// Smoothing time constant when an LED gets brighter (ms).
+    #[serde(default = "default_attack_ms")]
+    pub attack_ms: f32,
+    /// Smoothing time constant when an LED gets darker (ms).
+    #[serde(default = "default_decay_ms")]
+    pub decay_ms: f32,
+    /// Output hysteresis in 0..255 steps (suppresses shimmer).
+    #[serde(default = "default_deadband")]
+    pub deadband: f32,
+    /// Max R+G+B per LED when `light_compression` is on (power budget; 255 = stock).
+    #[serde(default = "default_compression_limit")]
+    pub compression_limit: u16,
 }
 
 /// LED 동작 모드
@@ -172,7 +184,11 @@ impl Default for AppConfig {
 }
 
 fn default_gamma() -> f32 { 1.0 }
-fn default_saturation() -> f32 { 1.0 }
+fn default_saturation() -> f32 { 2.0 }
+fn default_attack_ms() -> f32 { 40.0 }
+fn default_decay_ms() -> f32 { 250.0 }
+fn default_deadband() -> f32 { 2.0 }
+fn default_compression_limit() -> u16 { 255 }
 fn default_true() -> bool { true }
 fn default_edge_number() -> u8 { 3 }
 fn default_255() -> u8 { 255 }
@@ -185,10 +201,42 @@ impl SyncConfig {
 }
 
 impl Config {
+    /// Refuse absurdly large config files (the file is user-writable).
+    const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        if std::fs::metadata(path)?.len() > Self::MAX_CONFIG_BYTES {
+            return Err("config file too large".into());
+        }
         let content = std::fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&content)?;
+        let mut config: Config = toml::from_str(&content)?;
+        config.sanitize();
         Ok(config)
+    }
+
+    /// Clamp every value into a range the rest of the program can safely use.
+    pub fn sanitize(&mut self) {
+        fn f(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
+            if v.is_nan() { default } else { v.clamp(lo, hi) }
+        }
+        // LED index is a single byte on the wire
+        self.device.lamps_amount = self.device.lamps_amount.clamp(1, 255);
+        self.device.display_size = self.device.display_size.clamp(1, 200);
+        self.capture.fps = self.capture.fps.clamp(10, 60);
+        self.capture.sample_width = self.capture.sample_width.clamp(1, 500);
+        self.capture.monitor_name.truncate(128);
+        let s = &mut self.sync;
+        s.speed = s.speed.min(100);
+        s.gamma = f(s.gamma, 0.1, 3.0, 1.0);
+        s.saturation = f(s.saturation, 0.0, 3.0, 2.0);
+        s.attack_ms = f(s.attack_ms, 0.0, 2000.0, 40.0);
+        s.decay_ms = f(s.decay_ms, 0.0, 5000.0, 250.0);
+        s.deadband = f(s.deadband, 0.0, 10.0, 2.0);
+        s.compression_limit = s.compression_limit.clamp(30, 765);
+        if s.edge_number != 3 && s.edge_number != 4 {
+            s.edge_number = 3;
+        }
+        self.effect.effect_speed = self.effect.effect_speed.clamp(1, 100);
     }
 
     pub fn load_or_default() -> Self {
@@ -267,11 +315,15 @@ impl Default for SyncConfig {
             speed: 0,
             brightness: 255,
             gamma: 1.0,
-            saturation: 1.0,
+            saturation: default_saturation(),
             light_compression: true,
             smoothing: true,
             reverse: false,
             edge_number: 3,
+            attack_ms: default_attack_ms(),
+            decay_ms: default_decay_ms(),
+            deadband: default_deadband(),
+            compression_limit: default_compression_limit(),
         }
     }
 }
@@ -297,6 +349,31 @@ mod tests {
         let c: Config = toml::from_str("").unwrap();
         assert_eq!(c.device.lamps_amount, 65);
         assert_eq!(c.capture.fps, 30);
+    }
+
+    #[test]
+    fn sanitize_clamps_dangerous_values() {
+        let mut c: Config = toml::from_str(
+            "[device]\nlamps_amount = 100000\n[capture]\nfps = 0\n[sync]\ngamma = nan\nedge_number = 9\ncompression_limit = 0\nattack_ms = -5.0",
+        )
+        .unwrap();
+        c.sanitize();
+        assert_eq!(c.device.lamps_amount, 255);
+        assert_eq!(c.capture.fps, 10);
+        assert_eq!(c.sync.gamma, 1.0);
+        assert_eq!(c.sync.edge_number, 3);
+        assert_eq!(c.sync.compression_limit, 30);
+        assert_eq!(c.sync.attack_ms, 0.0);
+    }
+
+    #[test]
+    fn oversized_config_file_is_rejected() {
+        let dir = std::env::temp_dir().join("syncfastergb_cfg_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("big.toml");
+        std::fs::write(&p, "#".repeat(70 * 1024)).unwrap();
+        assert!(Config::load(&p).is_err());
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

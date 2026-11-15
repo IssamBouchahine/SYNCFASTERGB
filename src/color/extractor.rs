@@ -9,7 +9,9 @@
 /// 6. 채도 부스트 (HSL 기반)
 /// 7. 광량 압축 (R+G+B > 255 → 정규화)
 
-use std::collections::VecDeque;
+use super::pipeline::Smoother;
+use crate::config::SyncConfig;
+use std::time::Instant;
 
 /// 그리드 셀 색상
 #[derive(Clone, Copy, Debug)]
@@ -182,138 +184,71 @@ fn map_to_leds(border_colors: &[Rgb], lamp_count: u32) -> Vec<Rgb> {
         .collect()
 }
 
-/// 색상 추출기 — SyncLight 호환
+/// Color extractor: screen frame -> one smoothed raw RGB per LED.
+/// Grading (saturation, gamma, knee, power limit) happens later, in `pipeline::grade`.
 pub struct ColorExtractor {
     cols: u32,
     rows: u32,
     lamp_count: u32,
-    gamma: f32,
-    saturation: f32,
-    light_compression: bool,
     reverse: bool,
     edge_number: u8,
-    history: VecDeque<Vec<(u8, u8, u8)>>,
     smoothing: bool,
+    smoother: Smoother,
+    last_extract: Option<Instant>,
 }
 
-const SMOOTHING_FRAMES: usize = 10;
-
 impl ColorExtractor {
-    /// 설정 변경 시 파라미터 업데이트 (자동 적용)
-    pub fn update_config(
-        &mut self,
-        lamp_count: u32,
-        gamma: f32,
-        saturation: f32,
-        light_compression: bool,
-        smoothing: bool,
-        reverse: bool,
-        edge_number: u8,
-    ) {
-        if self.lamp_count != lamp_count {
-            self.lamp_count = lamp_count;
-            self.cols = 0; // 그리드 재계산 강제
-        }
-        self.gamma = gamma;
-        self.saturation = saturation;
-        self.light_compression = light_compression;
-        self.smoothing = smoothing;
-        self.reverse = reverse;
-        self.edge_number = edge_number;
-    }
-
-    pub fn new(
-        lamps_amount: u32,
-        _sample_width: u32,
-        gamma: f32,
-        saturation: f32,
-        light_compression: bool,
-        smoothing: bool,
-        reverse: bool,
-        edge_number: u8,
-    ) -> Self {
+    pub fn new(lamps_amount: u32, sync: &SyncConfig) -> Self {
         Self {
             cols: 0,
             rows: 0,
             lamp_count: lamps_amount,
-            gamma,
-            saturation,
-            light_compression,
-            reverse,
-            edge_number,
-            history: VecDeque::with_capacity(SMOOTHING_FRAMES + 1),
-            smoothing,
+            reverse: sync.reverse,
+            edge_number: sync.edge_number,
+            smoothing: sync.smoothing,
+            smoother: Smoother::new(sync.attack_ms, sync.decay_ms, sync.deadband),
+            last_extract: None,
         }
     }
 
-    /// BGRA 프레임 데이터에서 각 LED의 색상 추출 (전체 파이프라인)
+    /// Apply changed settings (hot reload).
+    pub fn update_config(&mut self, lamp_count: u32, sync: &SyncConfig) {
+        if self.lamp_count != lamp_count {
+            self.lamp_count = lamp_count;
+            self.cols = 0; // force grid recompute
+            self.smoother.reset();
+        }
+        self.reverse = sync.reverse;
+        self.edge_number = sync.edge_number;
+        self.smoothing = sync.smoothing;
+        self.smoother.attack_ms = sync.attack_ms;
+        self.smoother.decay_ms = sync.decay_ms;
+        self.smoother.deadband = sync.deadband;
+    }
+
+    /// Extract one color per LED from a BGRA frame.
     pub fn extract(&mut self, data: &[u8], pitch: u32, width: u32, height: u32) -> Vec<(u8, u8, u8)> {
-        // 1. 그리드 크기 결정 (첫 프레임 또는 해상도 변경 시)
         if self.cols == 0 {
             let (c, r) = aspect_grid(width, height);
             self.cols = c;
             self.rows = r;
-            log::info!("그리드 크기: {}x{} ({}x{} 해상도)", c, r, width, height);
+            self.smoother.reset();
+            log::info!("grid {}x{} ({}x{})", c, r, width, height);
         }
 
-        // 2. 화면 → 그리드 셀 평균 색상
         let grid = capture_grid(data, pitch, width, height, self.cols, self.rows);
-
-        // 3. 가장자리 색상 추출
         let border = extract_border_colors(&grid, self.cols, self.rows, self.edge_number, self.reverse);
-
-        // 4. LED 개수에 맞게 매핑
         let mapped = map_to_leds(&border, self.lamp_count);
+        let raw: Vec<[u8; 3]> = mapped.iter().map(|c| [c.r, c.g, c.b]).collect();
 
-        // 5. Raw RGB 반환 — 채도/광량압축/convertToBlack 등은
-        //    sender_loop에서 원본 SyncLight 동일 순서로 처리
-        let processed: Vec<(u8, u8, u8)> = mapped
-            .iter()
-            .map(|c| (c.r, c.g, c.b))
-            .collect();
+        let now = Instant::now();
+        let dt_ms = self
+            .last_extract
+            .map(|t| now.duration_since(t).as_secs_f32() * 1000.0)
+            .unwrap_or(33.0);
+        self.last_extract = Some(now);
 
-        // 6. 시간축 스무딩 (최근 N 프레임 평균)
-        if self.smoothing {
-            self.history.push_back(processed);
-            if self.history.len() > SMOOTHING_FRAMES {
-                self.history.pop_front();
-            }
-            self.averaged_colors()
-        } else {
-            processed
-        }
-    }
-
-    /// 히스토리에서 프레임 평균 계산 (SyncLight: A 함수)
-    fn averaged_colors(&self) -> Vec<(u8, u8, u8)> {
-        let frame_count = self.history.len();
-        if frame_count == 0 {
-            return vec![(0, 0, 0); self.lamp_count as usize];
-        }
-        if frame_count == 1 {
-            return self.history[0].clone();
-        }
-
-        let led_count = self.history[0].len();
-        (0..led_count)
-            .map(|i| {
-                let mut r_sum = 0u32;
-                let mut g_sum = 0u32;
-                let mut b_sum = 0u32;
-                for frame in &self.history {
-                    if i < frame.len() {
-                        r_sum += frame[i].0 as u32;
-                        g_sum += frame[i].1 as u32;
-                        b_sum += frame[i].2 as u32;
-                    }
-                }
-                (
-                    (r_sum / frame_count as u32) as u8,
-                    (g_sum / frame_count as u32) as u8,
-                    (b_sum / frame_count as u32) as u8,
-                )
-            })
-            .collect()
+        let out = if self.smoothing { self.smoother.update(&raw, dt_ms) } else { raw };
+        out.into_iter().map(|c| (c[0], c[1], c[2])).collect()
     }
 }
-
