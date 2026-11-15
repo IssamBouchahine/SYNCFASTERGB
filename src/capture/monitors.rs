@@ -1,7 +1,9 @@
 //! Monitor enumeration across ALL DXGI adapters (hybrid-GPU laptops expose the
 //! internal panel on the iGPU and external ports on the dGPU).
 
+use windows::core::PCWSTR;
 use windows::Win32::Graphics::Dxgi::*;
+use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorInfo {
@@ -18,12 +20,14 @@ pub struct MonitorInfo {
     pub height: u32,
     /// Only attached outputs can be duplicated.
     pub attached: bool,
+    /// EDID-based hardware id (e.g. `AOC3201`); stable across ports and index changes.
+    pub monitor_id: String,
 }
 
 impl MonitorInfo {
     /// Text matched by `capture.monitor_name`.
     pub fn match_text(&self) -> String {
-        format!("{} {}", self.adapter_name, self.device_name).to_lowercase()
+        format!("{} {} {}", self.adapter_name, self.device_name, self.monitor_id).to_lowercase()
     }
 }
 
@@ -35,6 +39,25 @@ pub fn select<'a>(monitors: &'a [MonitorInfo], index: u32, name: &str) -> Option
         return monitors.iter().find(|m| m.attached && m.match_text().contains(&name));
     }
     monitors.iter().find(|m| m.global_index == index)
+}
+
+/// Hardware id of the monitor attached to a GDI device name (`MONITOR\\<ID>\\{...}`).
+fn monitor_hw_id(device_name: &[u16; 32]) -> String {
+    unsafe {
+        let mut dd = DISPLAY_DEVICEW { cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+        if EnumDisplayDevicesW(PCWSTR(device_name.as_ptr()), 0, &mut dd, 0).as_bool() {
+            return parse_hw_id(&wide_to_string(&dd.DeviceID));
+        }
+    }
+    String::new()
+}
+
+fn parse_hw_id(device_id: &str) -> String {
+    let mut parts = device_id.split('\\');
+    match (parts.next(), parts.next()) {
+        (Some(kind), Some(id)) if kind.eq_ignore_ascii_case("MONITOR") => id.to_string(),
+        _ => String::new(),
+    }
 }
 
 fn wide_to_string(w: &[u16]) -> String {
@@ -67,6 +90,7 @@ pub fn enumerate() -> Result<Vec<MonitorInfo>, Box<dyn std::error::Error>> {
                         width: (r.right - r.left).max(0) as u32,
                         height: (r.bottom - r.top).max(0) as u32,
                         attached: d.AttachedToDesktop.as_bool(),
+                        monitor_id: monitor_hw_id(&d.DeviceName),
                     });
                     o += 1;
                 }
@@ -117,6 +141,7 @@ mod tests {
             width: 1920,
             height: 1080,
             attached,
+            monitor_id: String::new(),
         }
     }
 
@@ -147,6 +172,21 @@ mod tests {
         let mut s = sample();
         s[1].attached = false;
         assert!(select(&s, 0, "nvidia").is_none());
+    }
+
+    #[test]
+    fn hardware_id_parsing() {
+        assert_eq!(parse_hw_id(r"MONITOR\AOC3201\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001"), "AOC3201");
+        assert_eq!(parse_hw_id(r"PCI\VEN_10DE"), "");
+        assert_eq!(parse_hw_id(""), "");
+    }
+
+    #[test]
+    fn selects_by_hardware_id() {
+        let mut s = sample();
+        s[0].monitor_id = "LEN40A1".into();
+        s[1].monitor_id = "AOC3201".into();
+        assert_eq!(select(&s, 0, "aoc3201").unwrap().global_index, 1);
     }
 
     #[test]

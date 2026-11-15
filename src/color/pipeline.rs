@@ -91,6 +91,8 @@ pub struct Grade {
     /// Max channel below this is black; ramps to full by `knee_hi`.
     pub knee_lo: u8,
     pub knee_hi: u8,
+    /// Final software brightness scale 0.0..=1.0 (applied after the power limit).
+    pub brightness: f32,
 }
 
 impl Default for Grade {
@@ -102,6 +104,7 @@ impl Default for Grade {
             purify: true,
             knee_lo: 8,
             knee_hi: 28,
+            brightness: 1.0,
         }
     }
 }
@@ -227,7 +230,15 @@ pub fn grade(c: [u8; 3], g: &Grade) -> [u8; 3] {
     if let Some(limit) = g.compression_limit {
         c = compress(c, limit);
     }
-    c
+    scale(c, g.brightness)
+}
+
+fn scale(c: [u8; 3], b: f32) -> [u8; 3] {
+    let b = if b.is_nan() { 1.0 } else { b.clamp(0.0, 1.0) };
+    if b >= 0.999 {
+        return c;
+    }
+    [(c[0] as f32 * b).round() as u8, (c[1] as f32 * b).round() as u8, (c[2] as f32 * b).round() as u8]
 }
 
 #[cfg(test)]
@@ -349,6 +360,20 @@ mod tests {
         let b = grade([220, 160, 140], &plain);
         assert!((a[0] as i32 - a[2] as i32) > (b[0] as i32 - b[2] as i32));
         assert!(a.iter().map(|&v| v as u16).sum::<u16>() <= 255);
+    }
+
+    #[test]
+    fn brightness_scales_output_last() {
+        let full = Grade::default();
+        let half = Grade { brightness: 0.5, ..Grade::default() };
+        let a = grade([200, 40, 40], &full);
+        let b = grade([200, 40, 40], &half);
+        for k in 0..3 {
+            assert!((b[k] as i32 - (a[k] as f32 * 0.5).round() as i32).abs() <= 1);
+        }
+        assert_eq!(grade([200, 200, 200], &Grade { brightness: 0.0, ..full }), [0, 0, 0]);
+        assert_eq!(scale([10, 20, 30], f32::NAN), [10, 20, 30]);
+        assert_eq!(scale([10, 20, 30], 9.0), [10, 20, 30]);
     }
 
     #[test]

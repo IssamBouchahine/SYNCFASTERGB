@@ -101,7 +101,10 @@ impl DeviceConnection {
     /// 꽂혀 있으면 수십 초 걸렸다(로그: 재연결 1회 46초). 우리 VID/PID만 열거한다.
     #[allow(deprecated)] // 앱 코드에서 열거 범위를 직접 제한하는 용도 — hidapi 2.6 안내와 일치
     pub fn connect(_com_port: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let api = HidApi::new()?;
+        // Enumerate ONLY our VID/PID: cheap enough to poll every second, and it never
+        // touches unrelated (or hung) devices.
+        let mut api = HidApi::new_without_enumerate()?;
+        api.add_devices(VENDOR_ID, PRODUCT_ID)?;
 
         let dev_info = api.device_list()
             .find(|d| d.vendor_id() == VENDOR_ID && d.product_id() == PRODUCT_ID && d.interface_number() == 0)

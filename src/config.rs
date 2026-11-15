@@ -24,7 +24,7 @@ pub struct DeviceConfig {
     pub lamps_amount: u32,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(default)]
 pub struct CaptureConfig {
     pub fps: u32,
@@ -295,7 +295,7 @@ impl Config {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let header = "# SyncRGB 설정 파일\n\n";
+        let header = "# SYNCFASTERGB settings\n\n";
         let content = toml::to_string_pretty(self)?;
         std::fs::write(path, format!("{}{}", header, content))?;
         Ok(())
@@ -431,7 +431,6 @@ pub fn set_autostart(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 기존 Task Scheduler 항목 정리
-    cleanup_legacy_task();
 
     Ok(())
 }
@@ -457,11 +456,3 @@ pub fn is_autostart_enabled() -> bool {
     true
 }
 
-/// 기존 Task Scheduler 항목 정리 (마이그레이션)
-fn cleanup_legacy_task() {
-    use std::os::windows::process::CommandExt;
-    let _ = std::process::Command::new("schtasks")
-        .args(["/delete", "/tn", "SyncRGB", "/f"])
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .output();
-}

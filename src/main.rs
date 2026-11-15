@@ -9,7 +9,7 @@ mod device;
 mod gui;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -19,7 +19,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::WindowId;
 
 use capture::dxgi::{CaptureError, ScreenCapture};
@@ -66,6 +66,7 @@ fn main() {
     // 절전·종료 전환 핸드셰이크: 리스너가 요청(suspend_pending) → sender 가 LED 끄고 핸들 해제(device_released)
     let suspend_pending = Arc::new(AtomicBool::new(false));
     let device_released = Arc::new(AtomicBool::new(false));
+    let link_status = Arc::new(AtomicU8::new(LINK_SEARCHING));
 
     spawn_shutdown_listener(running.clone(), monitor_off.clone(), suspend_pending.clone(), device_released.clone());
 
@@ -91,13 +92,14 @@ fn main() {
         let screen_black = screen_black.clone();
         let suspend_pending = suspend_pending.clone();
         let device_released = device_released.clone();
+        let link_status = link_status.clone();
         std::thread::Builder::new()
             .name("sender".into())
-            .spawn(move || sender_loop(config, running, config_version, rx, monitor_off, screen_black, suspend_pending, device_released))
+            .spawn(move || sender_loop(config, running, config_version, rx, monitor_off, screen_black, suspend_pending, device_released, link_status))
             .expect("전송 스레드 생성 실패")
     };
 
-    run_tray(running.clone(), active, config_version, locale);
+    run_tray(running.clone(), active, config_version, locale, link_status);
 
     // 트레이 종료 후 스레드 정리 (정상 종료 경로)
     running.store(false, Ordering::SeqCst);
@@ -149,11 +151,29 @@ fn capture_loop(
     let mut frame_interval = Duration::from_millis(1000 / config.capture.fps as u64);
     let mut turn_off_on_black = config.app.turn_off_on_black;
 
-    let mut capturer = match ScreenCapture::new(&config.capture) {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("화면 캡처 초기화 실패: {}", e);
+    // The monitor may not exist yet (unplugged, asleep, still enumerating): keep trying
+    // with the freshest config until it appears or the app quits.
+    let mut capture_cfg = config.capture.clone();
+    let mut waiting_logged = false;
+    let mut capturer = loop {
+        if !running.load(Ordering::Relaxed) {
             return;
+        }
+        match ScreenCapture::new(&capture_cfg) {
+            Ok(c) => break c,
+            Err(e) => {
+                if !waiting_logged {
+                    log::warn!("screen capture not available yet ({}): retrying every 2 s", e);
+                    waiting_logged = true;
+                }
+                for _ in 0..10 {
+                    std::thread::sleep(Duration::from_millis(200));
+                    if !running.load(Ordering::Relaxed) {
+                        return;
+                    }
+                }
+                capture_cfg = Config::load_or_default().capture;
+            }
         }
     };
 
@@ -191,6 +211,14 @@ fn capture_loop(
             turn_off_on_black = c.app.turn_off_on_black;
             black_threshold_frames = c.capture.fps;
             extractor.update_config(c.device.lamps_amount, &c.sync);
+            if c.capture != capture_cfg {
+                // monitor / GPU path / HDR level changed in the settings window
+                capture_cfg = c.capture.clone();
+                match capturer.reinitialize(&capture_cfg) {
+                    Ok(()) => log::info!("capture settings applied"),
+                    Err(e) => log::warn!("capture settings not applied yet ({}); will keep retrying", e),
+                }
+            }
         }
 
         if !active.load(Ordering::Relaxed) {
@@ -267,7 +295,7 @@ fn capture_loop(
                 }
                 std::thread::sleep(Duration::from_secs(1));
                 access_lost_reinits += 1;
-                if let Err(e) = capturer.reinitialize(&Config::load_or_default().capture) {
+                if let Err(e) = capturer.reinitialize(&capture_cfg) {
                     if access_lost_reinits == 1 || access_lost_reinits % 300 == 0 {
                         log::error!("재초기화 실패 ({}회): {}", access_lost_reinits, e);
                     }
@@ -279,7 +307,7 @@ fn capture_loop(
                 if consecutive_errors >= 30 {
                     log::warn!("연속 오류 {}회 — DXGI 재초기화 시도", consecutive_errors);
                     consecutive_errors = 0;
-                    if let Err(e) = capturer.reinitialize(&Config::load_or_default().capture) {
+                    if let Err(e) = capturer.reinitialize(&capture_cfg) {
                         log::error!("재초기화 실패: {}", e);
                     }
                 }
@@ -309,6 +337,11 @@ fn capture_loop(
     }
 }
 
+/// Strip link state shown by the tray icon/tooltip.
+const LINK_SEARCHING: u8 = 0;
+const LINK_UP: u8 = 1;
+const LINK_HUNG: u8 = 2;
+
 /// 디바이스 링크 상태 (로그는 상태가 바뀔 때만 남긴다 — 2026-10-15 로그는 49초마다
 /// 5줄씩 재연결 스팸으로 1.5일 만에 회전돼 절전·복귀 시점의 증거가 날아갔다)
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -323,37 +356,31 @@ enum LinkState {
     Deaf,
 }
 
-/// 쓰기 실패 뒤 연결을 정리하고 다음 재연결 시각을 정한다.
-/// 먹통이면 핸들을 놓은 뒤 USB 리셋(예약 작업)을 에피소드당 1회 자동 시도한다.
+/// After a failed write: drop the connection and schedule the next attempt.
+/// No process is ever spawned here: a hung firmware (OUT NAK) can only be cured by
+/// replugging the strip, so we say so once and keep polling gently.
 fn handle_write_failure(
     e: &dyn std::error::Error,
     conn: &mut Option<DeviceConnection>,
     link: &mut LinkState,
     next_connect_at: &mut Instant,
-    usb_reset_tried: &mut bool,
 ) {
     use device::serial::{classify_error, WriteFailure};
     *conn = None;
     match classify_error(e) {
         WriteFailure::Hung => {
             if *link != LinkState::Hung {
-                log::error!("쓰기 타임아웃 — 펌웨어 먹통(OUT NAK): {}", e);
+                log::error!("strip firmware stopped accepting data ({}): unplug and replug the strip", e);
             }
             *link = LinkState::Hung;
-            if !*usb_reset_tried {
-                *usb_reset_tried = true;
-                usb_reset_device(false);
-                *next_connect_at = Instant::now() + Duration::from_secs(6);
-            } else {
-                *next_connect_at = Instant::now() + Duration::from_secs(30);
-            }
+            *next_connect_at = Instant::now() + Duration::from_secs(5);
         }
         WriteFailure::Gone => {
             if *link != LinkState::Absent {
-                log::warn!("디바이스 분리됨: {} — 재연결 대기", e);
+                log::warn!("strip disconnected ({}): waiting for it to come back", e);
             }
             *link = LinkState::Absent;
-            *next_connect_at = Instant::now() + Duration::from_secs(3);
+            *next_connect_at = Instant::now() + Duration::from_secs(1);
         }
     }
 }
@@ -367,6 +394,7 @@ fn sender_loop(
     screen_black: Arc<AtomicBool>,
     suspend_pending: Arc<AtomicBool>,
     device_released: Arc<AtomicBool>,
+    link_status: Arc<AtomicU8>,
 ) {
     let mut wire_map = WireMap::from_str(&config.device.wire_map);
     let mut send_interval = Duration::from_millis(config.sync.interval_ms());
@@ -381,7 +409,6 @@ fn sender_loop(
     let mut conn: Option<DeviceConnection> = None;
     let mut link = LinkState::Absent;
     let mut next_connect_at = Instant::now();
-    let mut usb_reset_tried = false;
     let mut last_hung_reminder = Instant::now();
 
     let mut local_version = 0u32;
@@ -395,6 +422,15 @@ fn sender_loop(
 
     while running.load(Ordering::Relaxed) {
         let send_start = Instant::now();
+
+        link_status.store(
+            match (&link, conn.is_some()) {
+                (LinkState::Hung, _) => LINK_HUNG,
+                (LinkState::Up, true) | (LinkState::Deaf, true) => LINK_UP,
+                _ => LINK_SEARCHING,
+            },
+            Ordering::Relaxed,
+        );
 
         // ── 절전 진입 / 세션 종료 예고: LED 끄고 핸들을 놓은 뒤 복귀까지 대기 ──
         // 디바이스는 5VSB로 PC가 꺼져도 전원이 유지돼 마지막 상태로 계속 빛난다.
@@ -426,22 +462,13 @@ fn sender_loop(
             match DeviceConnection::connect(&config.device.com_port) {
                 Ok(mut c) => {
                     let responded = c.init_device().unwrap_or(false);
-                    if let Err(e) = c.set_brightness(brightness) { log::warn!("밝기 실패: {}", e); }
+                    if let Err(e) = c.set_brightness(firmware_brightness(&current_mode, brightness)) { log::warn!("밝기 실패: {}", e); }
                     if responded {
-                        log::info!("디바이스 연결 (MAC={:02x?})", c.mac);
+                        log::info!("strip connected (MAC={:02x?})", c.mac);
                         link = LinkState::Up;
-                        usb_reset_tried = false;
-                    } else if !usb_reset_tried {
-                        // 2026-10-15 20:03 사례: 재부팅 직후 열거는 되는데 정보 응답이 없음 →
-                        // 2.5시간 뒤 완전 먹통. 핸들을 놓고 버스 리셋을 한 번 시도한다.
-                        log::warn!("디바이스 연결됐으나 getDeviceInfo 무응답 — USB 리셋 1회 시도");
-                        usb_reset_tried = true;
-                        drop(c);
-                        usb_reset_device(false);
-                        next_connect_at = Instant::now() + Duration::from_secs(6);
-                        continue;
                     } else {
-                        log::warn!("디바이스 연결 — 정보 응답 없음(반먹통). 스트리밍만 시도");
+                        // Some firmware revisions never answer the info request but stream fine.
+                        log::warn!("strip connected (no info reply; streaming anyway)");
                         link = LinkState::Deaf;
                     }
                     apply_mode(&c, &effect_cfg, lamps_amount);
@@ -453,16 +480,16 @@ fn sender_loop(
                     if link == LinkState::Hung {
                         if last_hung_reminder.elapsed() >= Duration::from_secs(600) {
                             last_hung_reminder = Instant::now();
-                            log::error!("디바이스 먹통 지속 — USB 전원 재인가(물리 재삽입) 필요");
+                            log::error!("strip still not responding: unplug and replug it");
                         }
                     } else {
                         link = LinkState::Absent;
                         static ABSENT_LOGGED: AtomicBool = AtomicBool::new(false);
                         if !ABSENT_LOGGED.swap(true, Ordering::Relaxed) {
-                            log::warn!("연결 실패: {} — 3초 간격 재시도 (이후 조용히)", e);
+                            log::warn!("no strip found yet ({}): checking every second, quietly", e);
                         }
                     }
-                    next_connect_at = Instant::now() + Duration::from_secs(3);
+                    next_connect_at = Instant::now() + Duration::from_secs(1);
                     continue;
                 }
             }
@@ -476,9 +503,13 @@ fn sender_loop(
             send_interval = Duration::from_millis(c.sync.interval_ms());
             grade_params = grade_from_config(&c.sync);
 
+            // Sync mode scales brightness in software (smooth, no firmware command per change);
+            // the firmware level only matters for the strip's built-in effects.
             if brightness != c.sync.brightness {
                 brightness = c.sync.brightness;
-                if let Some(d) = conn.as_ref() { let _ = d.set_brightness(brightness); }
+                if current_mode != LedMode::Sync {
+                    if let Some(d) = conn.as_ref() { let _ = d.set_brightness(brightness); }
+                }
             }
 
             lamps_amount = c.device.lamps_amount;
@@ -497,6 +528,7 @@ fn sender_loop(
                         next_connect_at = Instant::now() + Duration::from_secs(1);
                         continue;
                     }
+                    let _ = d.set_brightness(firmware_brightness(&current_mode, brightness));
                 }
             }
         }
@@ -509,7 +541,7 @@ fn sender_loop(
                 log::info!("화면 꺼짐 감지 — LED 끄기");
                 if let Some(d) = conn.as_ref() {
                     if let Err(e) = d.turn_off() {
-                        handle_write_failure(e.as_ref(), &mut conn, &mut link, &mut next_connect_at, &mut usb_reset_tried);
+                        handle_write_failure(e.as_ref(), &mut conn, &mut link, &mut next_connect_at);
                         continue;
                     }
                 }
@@ -522,7 +554,7 @@ fn sender_loop(
             log::info!("화면 복귀 — LED 복원");
             blanked_by_screen = false;
             if let Some(d) = conn.as_ref() {
-                let _ = d.set_brightness(brightness);
+                let _ = d.set_brightness(firmware_brightness(&current_mode, brightness));
                 apply_mode(d, &effect_cfg, lamps_amount);
             }
         }
@@ -554,7 +586,7 @@ fn sender_loop(
                     send_count += 1;
 
                     if let Err(e) = d.set_sync_screen(&color_data) {
-                        handle_write_failure(e.as_ref(), &mut conn, &mut link, &mut next_connect_at, &mut usb_reset_tried);
+                        handle_write_failure(e.as_ref(), &mut conn, &mut link, &mut next_connect_at);
                         continue;
                     }
                 }
@@ -572,7 +604,7 @@ fn sender_loop(
             if let Some(ref mut meter) = audio_meter {
                 let vol = meter.peak_volume();
                 if let Err(e) = d.set_computer_rhythm(effect_cfg.sound_index, vol) {
-                    handle_write_failure(e.as_ref(), &mut conn, &mut link, &mut next_connect_at, &mut usb_reset_tried);
+                    handle_write_failure(e.as_ref(), &mut conn, &mut link, &mut next_connect_at);
                     continue;
                 }
             }
@@ -630,7 +662,7 @@ fn sender_loop(
                 SoftEffect::None => Ok(()),
             };
             if let Err(e) = result {
-                handle_write_failure(e.as_ref(), &mut conn, &mut link, &mut next_connect_at, &mut usb_reset_tried);
+                handle_write_failure(e.as_ref(), &mut conn, &mut link, &mut next_connect_at);
                 continue;
             }
             while rx.try_recv().is_ok() {}
@@ -708,58 +740,18 @@ fn apply_mode(conn: &DeviceConnection, effect: &config::EffectConfig, lamps_amou
     }
 }
 
+/// Firmware brightness: full in Sync mode (software scaling handles it), user level otherwise.
+fn firmware_brightness(mode: &LedMode, brightness: u8) -> u8 {
+    if *mode == LedMode::Sync { 255 } else { brightness }
+}
+
 fn grade_from_config(sync: &config::SyncConfig) -> pipeline::Grade {
     pipeline::Grade {
         saturation_gain: sync.saturation,
         gamma: sync.gamma,
         compression_limit: if sync.light_compression { Some(sync.compression_limit) } else { None },
+        brightness: sync.brightness as f32 / 255.0,
         ..pipeline::Grade::default()
-    }
-}
-
-/// 먹통 디바이스 복구 시도: pnputil /restart-device 로 USB 디바이스 재시작.
-/// 1순위: 예약 작업 `SyncRGB-USBReset`(최고 권한으로 등록돼 있어 UAC 없이 실행, 2026-10-16 메인PC 등록·검증).
-/// 2순위(수동 호출만): 작업이 없으면 pnputil 을 UAC 승격으로 직접 실행.
-/// PnP 재시작은 버스 리셋까지만 하고 VBUS 전원은 유지되므로,
-/// 이걸로도 안 살아나는 완전 먹통이면 물리 재연결만 유효하다.
-/// 인스턴스 경로의 시리얼 "0123456789"는 펌웨어 고정값이라 포트를 옮겨도 동일.
-fn usb_reset_device(manual: bool) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const TASK_NAME: &str = "SyncRGB-USBReset";
-
-    match std::process::Command::new("schtasks")
-        .args(["/run", "/tn", TASK_NAME])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-    {
-        Ok(out) if out.status.success() => {
-            log::info!("USB 디바이스 리셋 실행 (예약 작업 {})", TASK_NAME);
-            return;
-        }
-        Ok(out) => {
-            log::warn!("예약 작업 {} 실행 실패 (exit {:?}): {}", TASK_NAME, out.status.code(),
-                String::from_utf8_lossy(&out.stderr).trim());
-        }
-        Err(e) => log::warn!("schtasks 실행 실패: {}", e),
-    }
-    if !manual {
-        log::warn!("자동 USB 리셋 불가 — 예약 작업 {} 을 관리자 권한으로 등록하면 UAC 없이 동작한다", TASK_NAME);
-        return;
-    }
-
-    log::info!("USB 디바이스 리셋 시도 (pnputil, UAC 승인 필요)");
-    let instance = format!(r"USB\VID_{:04X}&PID_{:04X}\0123456789",
-        device::serial::VENDOR_ID, device::serial::PRODUCT_ID);
-    let ps_cmd = format!(
-        "Start-Process pnputil -Verb RunAs -WindowStyle Hidden -ArgumentList '/restart-device','{}'",
-        instance);
-    if let Err(e) = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-    {
-        log::error!("USB 리셋 실행 실패: {}", e);
     }
 }
 
@@ -933,14 +925,15 @@ unsafe extern "system" fn shutdown_wnd_proc(
     }
 }
 
-fn run_tray(running: Arc<AtomicBool>, active: Arc<AtomicBool>, config_version: Arc<AtomicU32>, locale: &'static gui::Locale) {
+fn run_tray(running: Arc<AtomicBool>, active: Arc<AtomicBool>, config_version: Arc<AtomicU32>, locale: &'static gui::Locale, link_status: Arc<AtomicU8>) {
     let event_loop = EventLoop::new().expect("이벤트 루프 생성 실패");
     let mut app = TrayApp {
         running, active, config_version,
         config_path: Config::config_path(),
         last_mtime: None, tick_counter: 0,
-        tray: None, toggle_item: None, settings_item: None, reset_item: None, quit_item: None,
+        tray: None, toggle_item: None, settings_item: None, quit_item: None,
         locale,
+        link_status, last_link: u8::MAX,
     };
     event_loop.run_app(&mut app).ok();
 }
@@ -955,9 +948,10 @@ struct TrayApp {
     tray: Option<TrayIcon>,
     toggle_item: Option<MenuItem>,
     settings_item: Option<MenuItem>,
-    reset_item: Option<MenuItem>,
     quit_item: Option<MenuItem>,
     locale: &'static gui::Locale,
+    link_status: Arc<AtomicU8>,
+    last_link: u8,
 }
 
 impl ApplicationHandler for TrayApp {
@@ -967,24 +961,21 @@ impl ApplicationHandler for TrayApp {
         let menu = Menu::new();
         let toggle = MenuItem::new(self.locale.tray_pause, true, None);
         let settings = MenuItem::new(self.locale.tray_settings, true, None);
-        let reset = MenuItem::new(self.locale.tray_reset_usb, true, None);
         let quit = MenuItem::new(self.locale.tray_quit, true, None);
         menu.append(&toggle).ok();
         menu.append(&settings).ok();
-        menu.append(&reset).ok();
         menu.append(&PredefinedMenuItem::separator()).ok();
         menu.append(&quit).ok();
 
         let tray = TrayIconBuilder::new()
             .with_icon(create_rgb_tray_icon())
-            .with_tooltip("SyncRGB")
+            .with_tooltip("SYNCFASTERGB: searching for strip")
             .with_menu(Box::new(menu))
             .build()
             .expect("트레이 아이콘 생성 실패");
 
         self.toggle_item = Some(toggle);
         self.settings_item = Some(settings);
-        self.reset_item = Some(reset);
         self.quit_item = Some(quit);
         self.tray = Some(tray);
         self.last_mtime = std::fs::metadata(&self.config_path).ok().and_then(|m| m.modified().ok());
@@ -1006,18 +997,12 @@ impl ApplicationHandler for TrayApp {
                         }
                     } else {
                         toggle.set_text(self.locale.tray_pause);
-                        if let Some(ref tray) = self.tray {
-                            tray.set_icon(Some(create_rgb_tray_icon())).ok();
-                            tray.set_tooltip(Some("SyncRGB")).ok();
-                        }
+                        self.last_link = u8::MAX; // force a status refresh below
                     }
                 }
             }
             if let Some(ref s) = self.settings_item {
                 if event.id() == s.id() { gui::open_settings(); }
-            }
-            if let Some(ref r) = self.reset_item {
-                if event.id() == r.id() { usb_reset_device(true); }
             }
             if let Some(ref q) = self.quit_item {
                 if event.id() == q.id() {
@@ -1027,8 +1012,23 @@ impl ApplicationHandler for TrayApp {
             }
         }
 
+        // Tray icon/tooltip follow the strip connection (unless paused by the user).
+        let link = self.link_status.load(Ordering::Relaxed);
+        if link != self.last_link && self.active.load(Ordering::Relaxed) {
+            self.last_link = link;
+            if let Some(ref tray) = self.tray {
+                let (icon, tip) = match link {
+                    LINK_UP => (create_rgb_tray_icon(), "SYNCFASTERGB: strip connected"),
+                    LINK_HUNG => (create_gray_tray_icon(), "SYNCFASTERGB: strip not responding, unplug and replug it"),
+                    _ => (create_gray_tray_icon(), "SYNCFASTERGB: searching for strip"),
+                };
+                tray.set_icon(Some(icon)).ok();
+                tray.set_tooltip(Some(tip)).ok();
+            }
+        }
+
         self.tick_counter += 1;
-        if self.tick_counter % 100 == 0 {
+        if self.tick_counter % 10 == 0 {
             if let Ok(meta) = std::fs::metadata(&self.config_path) {
                 if let Ok(mtime) = meta.modified() {
                     if self.last_mtime.map_or(true, |prev| mtime != prev) {
@@ -1057,6 +1057,7 @@ impl ApplicationHandler for TrayApp {
             }
         }
 
-        std::thread::sleep(Duration::from_millis(10));
+        // Wake ~10x/s instead of busy-looping (menu clicks still respond within 100 ms).
+        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100)));
     }
 }
