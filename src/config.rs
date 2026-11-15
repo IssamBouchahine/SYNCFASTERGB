@@ -3,8 +3,11 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
+    #[serde(default)]
     pub device: DeviceConfig,
+    #[serde(default)]
     pub capture: CaptureConfig,
+    #[serde(default)]
     pub sync: SyncConfig,
     #[serde(default)]
     pub effect: EffectConfig,
@@ -13,6 +16,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct DeviceConfig {
     pub com_port: String,
     pub wire_map: String,
@@ -21,13 +25,18 @@ pub struct DeviceConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct CaptureConfig {
     pub fps: u32,
+    /// Global output index across ALL GPUs (see `--list-monitors`).
     pub monitor: u32,
+    /// Optional case-insensitive substring of "<gpu> <display name>"; overrides `monitor` when set.
+    pub monitor_name: String,
     pub sample_width: u32,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct SyncConfig {
     pub speed: u32,
     pub brightness: u8,
@@ -240,33 +249,66 @@ impl Config {
     }
 }
 
+impl Default for DeviceConfig {
+    fn default() -> Self {
+        Self { com_port: "auto".into(), wire_map: "RGB".into(), display_size: 27, lamps_amount: 65 }
+    }
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self { fps: 30, monitor: 0, monitor_name: String::new(), sample_width: 50 }
+    }
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            speed: 0,
+            brightness: 255,
+            gamma: 1.0,
+            saturation: 1.0,
+            light_compression: true,
+            smoothing: true,
+            reverse: false,
+            edge_number: 3,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
-            device: DeviceConfig {
-                com_port: "auto".into(),
-                wire_map: "RGB".into(),
-                display_size: 27,
-                lamps_amount: 65,
-            },
-            capture: CaptureConfig {
-                fps: 30,
-                monitor: 0,
-                sample_width: 50,
-            },
-            sync: SyncConfig {
-                speed: 0,
-                brightness: 255,
-                gamma: 1.0,
-                saturation: 1.0,
-                light_compression: true,
-                smoothing: true,
-                reverse: false,
-                edge_number: 3,
-            },
+            device: DeviceConfig::default(),
+            capture: CaptureConfig::default(),
+            sync: SyncConfig::default(),
             effect: EffectConfig::default(),
             app: AppConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_config_uses_defaults() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.device.lamps_amount, 65);
+        assert_eq!(c.capture.fps, 30);
+    }
+
+    #[test]
+    fn partial_config_is_accepted() {
+        let c: Config = toml::from_str("[device]
+lamps_amount = 71
+[capture]
+monitor_name = \"dp\"").unwrap();
+        assert_eq!(c.device.lamps_amount, 71);
+        assert_eq!(c.device.display_size, 27);
+        assert_eq!(c.capture.monitor_name, "dp");
+        assert_eq!(c.capture.sample_width, 50);
     }
 }
 

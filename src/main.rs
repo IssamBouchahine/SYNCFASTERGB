@@ -30,8 +30,13 @@ use device::serial::DeviceConnection;
 
 fn main() {
     // --console 플래그: 릴리즈에서도 콘솔 표시
-    if std::env::args().any(|a| a == "--console") {
+    if std::env::args().any(|a| a == "--console" || a == "--list-monitors") {
         unsafe { attach_console(); }
+    }
+
+    if std::env::args().any(|a| a == "--list-monitors") {
+        capture::monitors::print_list();
+        return;
     }
 
     init_logging();
@@ -143,7 +148,7 @@ fn capture_loop(
     let mut frame_interval = Duration::from_millis(1000 / config.capture.fps as u64);
     let mut turn_off_on_black = config.app.turn_off_on_black;
 
-    let mut capturer = match ScreenCapture::new(config.capture.monitor) {
+    let mut capturer = match ScreenCapture::new(&config.capture) {
         Ok(c) => c,
         Err(e) => {
             log::error!("화면 캡처 초기화 실패: {}", e);
@@ -244,7 +249,7 @@ fn capture_loop(
                 }
                 std::thread::sleep(Duration::from_secs(1));
                 access_lost_reinits += 1;
-                if let Err(e) = capturer.reinitialize(Config::load_or_default().capture.monitor) {
+                if let Err(e) = capturer.reinitialize(&Config::load_or_default().capture) {
                     if access_lost_reinits == 1 || access_lost_reinits % 300 == 0 {
                         log::error!("재초기화 실패 ({}회): {}", access_lost_reinits, e);
                     }
@@ -256,7 +261,7 @@ fn capture_loop(
                 if consecutive_errors >= 30 {
                     log::warn!("연속 오류 {}회 — DXGI 재초기화 시도", consecutive_errors);
                     consecutive_errors = 0;
-                    if let Err(e) = capturer.reinitialize(Config::load_or_default().capture.monitor) {
+                    if let Err(e) = capturer.reinitialize(&Config::load_or_default().capture) {
                         log::error!("재초기화 실패: {}", e);
                     }
                 }

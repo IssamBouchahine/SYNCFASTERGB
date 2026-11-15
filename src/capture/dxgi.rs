@@ -1,12 +1,14 @@
 use windows::core::Interface;
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use super::monitors;
+use crate::config::CaptureConfig;
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 
 /// DXGI Desktop Duplication을 통한 화면 캡처
 pub struct ScreenCapture {
-    device: ID3D11Device,
+    _device: ID3D11Device, // keeps the adapter device alive
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
     staging: ID3D11Texture2D,
@@ -15,16 +17,26 @@ pub struct ScreenCapture {
 }
 
 impl ScreenCapture {
-    /// 지정된 모니터의 Desktop Duplication 초기화
-    pub fn new(monitor_index: u32) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Desktop Duplication on the monitor chosen by config. The D3D11 device is created
+    /// on the adapter that OWNS the output (required on hybrid-GPU laptops).
+    pub fn new(cfg: &CaptureConfig) -> Result<Self, Box<dyn std::error::Error>> {
         unsafe {
-            // D3D11 디바이스 생성
+            let monitors = monitors::enumerate()?;
+            let m = monitors::select(&monitors, cfg.monitor, &cfg.monitor_name)
+                .ok_or("requested monitor not found (run with --list-monitors)")?;
+            if !m.attached {
+                return Err(format!("monitor [{}] {} is not attached to the desktop", m.global_index, m.device_name).into());
+            }
+
+            let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
+            let adapter: IDXGIAdapter1 = factory.EnumAdapters1(m.adapter_index)?;
+            let adapter_base: IDXGIAdapter = adapter.cast()?;
+
             let mut device = None;
             let mut context = None;
-
             D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
+                &adapter_base,
+                D3D_DRIVER_TYPE_UNKNOWN,
                 None,
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                 None,
@@ -33,55 +45,25 @@ impl ScreenCapture {
                 None,
                 Some(&mut context),
             )?;
+            let device = device.ok_or("D3D11 device creation failed")?;
+            let context = context.ok_or("D3D11 context creation failed")?;
 
-            let device = device.ok_or("D3D11 디바이스 생성 실패")?;
-            let context = context.ok_or("D3D11 컨텍스트 생성 실패")?;
-
-            // DXGI 어댑터 → 출력(모니터) 가져오기
-            let dxgi_device: IDXGIDevice = device.cast()?;
-            let adapter: IDXGIAdapter = dxgi_device.GetParent()?;
-            let output: IDXGIOutput = adapter.EnumOutputs(monitor_index)?;
+            let output: IDXGIOutput = adapter.EnumOutputs(m.output_index)?;
             let output1: IDXGIOutput1 = output.cast()?;
-
-            // Desktop Duplication 생성
             let duplication = output1.DuplicateOutput(&device)?;
 
-            // 출력 해상도 가져오기
             let desc = output.GetDesc()?;
             let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as u32;
             let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as u32;
 
-            log::info!("화면 캡처 초기화: {}x{} (모니터 #{})", width, height, monitor_index);
+            log::info!(
+                "capture init: {}x{} on [{}] {} / {}",
+                width, height, m.global_index, m.adapter_name, m.device_name
+            );
 
-            // Staging 텍스처 (GPU → CPU 복사용)
-            let staging_desc = D3D11_TEXTURE2D_DESC {
-                Width: width,
-                Height: height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_STAGING,
-                BindFlags: 0,
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                MiscFlags: 0,
-            };
+            let staging = create_staging(&device, width, height)?;
 
-            let mut staging = None;
-            device.CreateTexture2D(&staging_desc, None, Some(&mut staging))?;
-            let staging = staging.ok_or("Staging 텍스처 생성 실패")?;
-
-            Ok(Self {
-                device,
-                context,
-                duplication,
-                staging,
-                width,
-                height,
-            })
+            Ok(Self { _device: device, context, duplication, staging, width, height })
         }
     }
 
@@ -146,48 +128,29 @@ impl ScreenCapture {
         }
     }
 
-    /// Desktop Duplication 재초기화 (AccessLost 시)
-    /// 해상도 변경도 감지하여 staging 텍스처 재생성
-    pub fn reinitialize(&mut self, monitor_index: u32) -> Result<(), Box<dyn std::error::Error>> {
-        unsafe {
-            let dxgi_device: IDXGIDevice = self.device.cast()?;
-            let adapter: IDXGIAdapter = dxgi_device.GetParent()?;
-            let output: IDXGIOutput = adapter.EnumOutputs(monitor_index)?;
-            let output1: IDXGIOutput1 = output.cast()?;
-            self.duplication = output1.DuplicateOutput(&self.device)?;
-
-            // 해상도 변경 감지 → staging 텍스처 재생성
-            let desc = output.GetDesc()?;
-            let new_width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as u32;
-            let new_height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as u32;
-
-            if new_width != self.width || new_height != self.height {
-                log::info!("해상도 변경 감지: {}x{} → {}x{}", self.width, self.height, new_width, new_height);
-                self.width = new_width;
-                self.height = new_height;
-
-                let staging_desc = D3D11_TEXTURE2D_DESC {
-                    Width: new_width,
-                    Height: new_height,
-                    MipLevels: 1,
-                    ArraySize: 1,
-                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                    Usage: D3D11_USAGE_STAGING,
-                    BindFlags: 0,
-                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                    MiscFlags: 0,
-                };
-
-                let mut staging = None;
-                self.device.CreateTexture2D(&staging_desc, None, Some(&mut staging))?;
-                self.staging = staging.ok_or("Staging 텍스처 재생성 실패")?;
-            }
-
-            log::debug!("Desktop Duplication 재초기화 완료 ({}x{})", self.width, self.height);
-            Ok(())
-        }
+    /// Re-create everything (AccessLost, resolution change, adapter change).
+    pub fn reinitialize(&mut self, cfg: &CaptureConfig) -> Result<(), Box<dyn std::error::Error>> {
+        *self = Self::new(cfg)?;
+        Ok(())
     }
+}
+
+unsafe fn create_staging(device: &ID3D11Device, width: u32, height: u32) -> Result<ID3D11Texture2D, Box<dyn std::error::Error>> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_STAGING,
+        BindFlags: 0,
+        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+        MiscFlags: 0,
+    };
+    let mut staging = None;
+    device.CreateTexture2D(&desc, None, Some(&mut staging))?;
+    Ok(staging.ok_or("staging texture creation failed")?)
 }
 
 #[derive(Debug)]
