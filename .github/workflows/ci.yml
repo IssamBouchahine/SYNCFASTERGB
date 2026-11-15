@@ -45,6 +45,17 @@ jobs:
       - name: Release build
         run: cargo build --release --locked
 
+      - name: Verify the exe is self-contained (no Visual C++ runtime DLLs)
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $db = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe | Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+          $env:Path += ";$(Split-Path $db.FullName)"
+          $deps = & $db.FullName /dependents target/release/syncfastergb.exe | Select-String '\.dll' | ForEach-Object { $_.Line.Trim() }
+          $deps
+          $bad = $deps | Where-Object { $_ -match 'VCRUNTIME|api-ms-win-crt|MSVCP|ucrtbase' }
+          if ($bad) { throw "the exe depends on the Visual C++ runtime: $bad" }
+
   supply-chain:
     name: Advisories, licenses, bans (no network crates)
     runs-on: ubuntu-latest

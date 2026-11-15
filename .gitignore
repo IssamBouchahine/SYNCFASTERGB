@@ -3,8 +3,7 @@
 *.exe
 *.pdb
 
-# Per-user runtime settings and logs (may contain local paths / device identifiers)
-config.toml
+# Logs (the program itself writes none; these come from debugging runs)
 *.log
 
 # Private handoff / personal notes: never commit
