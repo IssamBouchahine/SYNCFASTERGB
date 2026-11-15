@@ -204,8 +204,8 @@ fn default_deadband() -> f32 { 2.0 }
 pub const MAX_POWER_LIMIT_PCT: u8 = 80;
 
 fn default_power_limit_pct() -> u8 { 40 }
-fn default_edge_depth_pct() -> u8 { 12 }
-fn default_black_level() -> u8 { 18 }
+fn default_edge_depth_pct() -> u8 { 15 }
+fn default_black_level() -> u8 { 26 }
 fn default_true() -> bool { true }
 fn default_edge_number() -> u8 { 3 }
 fn default_255() -> u8 { 255 }
@@ -448,9 +448,9 @@ mod tests {
         assert_eq!(c.device.lamps_amount, 65);
         assert_eq!(c.capture.fps, 60);
         assert_eq!(c.capture.game_fps, 30);
-        assert_eq!(c.sync.edge_depth_pct, 12);
+        assert_eq!(c.sync.edge_depth_pct, 15);
         assert!(c.sync.skip_black_bars);
-        assert_eq!(c.sync.black_level, 18);
+        assert_eq!(c.sync.black_level, 26);
     }
 
     #[test]

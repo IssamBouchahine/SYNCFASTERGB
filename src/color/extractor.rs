@@ -124,6 +124,9 @@ impl Frame<'_> {
 /// for a huge bar.
 const MAX_BAR_PCT: usize = 20;
 
+/// Thinnest bar (in lines of the small picture) worth skipping.
+const MIN_BAR: usize = 2;
+
 /// Black-bar thickness in lines on each side: (top, bottom, left, right).
 fn detect_bars(f: &Frame, black_level: u8) -> (usize, usize, usize, usize) {
     let thr = black_level as u32;
@@ -134,6 +137,12 @@ fn detect_bars(f: &Frame, black_level: u8) -> (usize, usize, usize, usize) {
     let bottom = count(f.h, cap_y, &|i| f.row_luma(f.h - 1 - i));
     let left = count(f.w, cap_x, &|i| f.col_luma(i));
     let right = count(f.w, cap_x, &|i| f.col_luma(f.w - 1 - i));
+    // A real letterbox / pillarbox has bars on BOTH opposite sides. A dark region on one side
+    // only (a night sky, a dark floor) is picture, not a bar, and must not be skipped. When the
+    // two sides differ slightly the smaller bar is used for both, the safe choice.
+    let pair = |a: usize, b: usize| if a >= MIN_BAR && b >= MIN_BAR { (a.min(b), a.min(b)) } else { (0, 0) };
+    let (top, bottom) = pair(top, bottom);
+    let (left, right) = pair(left, right);
     (top, bottom, left, right)
 }
 
@@ -516,6 +525,149 @@ mod tests {
         // skipping off: the strips start at the very edge
         let (g2, _) = sample_edges(f.data, f.pitch, f.w, f.h, &params(12, false), bars);
         assert_eq!((g2.t, g2.b, g2.l, g2.r), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn one_sided_dark_regions_are_picture_not_bars() {
+        // black sky on top, lit ground below: only the top is dark, so nothing is skipped
+        let d = frame(160, 90, |_, y| if y < 27 { (2, 2, 2) } else { (70, 80, 60) });
+        let f = view(&d, 160, 90);
+        assert_eq!(detect_bars(&f, 26), (0, 0, 0, 0));
+        let (t, b, l, r) = detect_bars(&f, 26);
+        let top = edge_colors(&f, &params(15, true), (t, b, l, r))[18 + 5];
+        assert!(top.r < 10, "the LEDs above a dark sky stay dark, got {top:?}");
+    }
+
+    #[test]
+    fn slightly_uneven_bars_use_the_smaller_one() {
+        let d = frame(160, 90, |_, y| if !(12..78).contains(&y) { (0, 0, 0) } else { ORANGE });
+        let f = view(&d, 160, 90);
+        assert_eq!(detect_bars(&f, 26), (12, 12, 0, 0));
+        let d = frame(160, 90, |_, y| if y < 12 || y >= 80 { (0, 0, 0) } else { ORANGE }); // 12 top, 10 bottom
+        assert_eq!(detect_bars(&view(&d, 160, 90), 26), (10, 10, 0, 0));
+        // a 1-line dark edge is not worth skipping
+        let d = frame(160, 90, |_, y| if y == 0 || y == 89 { (0, 0, 0) } else { ORANGE });
+        assert_eq!(detect_bars(&view(&d, 160, 90), 26), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn default_black_level_catches_lifted_blacks_and_dark_page_chrome() {
+        let level = 26u8;
+        // studio-range black (16) with noise, and #181818 page chrome (24)
+        let noisy = frame(160, 90, |x, y| {
+            if !(12..78).contains(&y) { let v = (17 + ((x * 7919 + y * 104729) % 7) as i32 - 3) as u8; (v, v, v) } else { ORANGE }
+        });
+        assert_eq!(detect_bars(&view(&noisy, 160, 90), level), (12, 12, 0, 0));
+        let chrome = frame(160, 90, |_, y| if !(12..78).contains(&y) { (24, 24, 24) } else { ORANGE });
+        assert_eq!(detect_bars(&view(&chrome, 160, 90), level), (12, 12, 0, 0));
+        // a mid-grey border is NOT a bar
+        let grey = frame(160, 90, |_, y| if !(12..78).contains(&y) { (60, 60, 60) } else { ORANGE });
+        assert_eq!(detect_bars(&view(&grey, 160, 90), level), (0, 0, 0, 0));
+    }
+
+    /// Developer report used to choose the default depth and black level. Run with:
+    /// `cargo test tuning_report -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn tuning_report() {
+        let pic = |y: f32| -> (u8, u8, u8) {
+            (40 + (170.0 * y) as u8, 90 + (30.0 * y) as u8, 200 - (160.0 * y) as u8)
+        };
+        // deterministic pseudo-noise in -3..=3
+        let noise = |x: usize, y: usize| -> i32 { ((x * 7919 + y * 104729) % 7) as i32 - 3 };
+        let (w, h) = (160usize, 90usize);
+        let grey = |v: i32| -> (u8, u8, u8) { let v = v.clamp(0, 255) as u8; (v, v, v) };
+
+        // letterboxed 2.39:1 (12 rows of bar at each side), bars of a given value (+ noise)
+        let letterbox = |bar: i32, noisy: bool| {
+            frame(w, h, move |x, y| {
+                if y < 12 || y >= 78 { grey(bar + if noisy { noise(x, y) } else { 0 }) } else { pic((y - 12) as f32 / 66.0) }
+            })
+        };
+        let a = letterbox(0, false); // pure black bars
+        let b = letterbox(17, true); // lifted blacks (studio-range black is 16) with noise
+        let c = letterbox(24, false); // dark-grey page chrome (#181818)
+        let d = frame(w, h, |x, y| if !(20..140).contains(&x) { (0, 0, 0) } else { pic(y as f32 / 90.0) }); // 4:3 pillarbox
+        let e = frame(w, h, |x, y| { // window-boxed: bars on all four sides
+            if y < 12 || y >= 78 || !(20..140).contains(&x) { (0, 0, 0) } else { pic((y - 12) as f32 / 66.0) }
+        });
+        let f_dark = frame(w, h, |x, y| { // dark scene, no bars, bright subject starting ~20% in
+            if (18..72).contains(&y) && (40..120).contains(&x) { (200, 180, 150) } else { grey(6) }
+        });
+
+        let avg = |v: &Vec<[u8; 3]>| -> (f32, f32, f32) {
+            let n = v.len() as f32;
+            (v.iter().map(|c| c[0] as f32).sum::<f32>() / n, v.iter().map(|c| c[1] as f32).sum::<f32>() / n, v.iter().map(|c| c[2] as f32).sum::<f32>() / n)
+        };
+        let err = |got: (f32, f32, f32), want: (u8, u8, u8)| -> f32 {
+            ((got.0 - want.0 as f32).abs() + (got.1 - want.1 as f32).abs() + (got.2 - want.2 as f32).abs()) / 3.0
+        };
+        let top_err = |d: &Vec<u8>, p: &EdgeParams| -> f32 {
+            let f = view(d, w, h);
+            let bars = detect_bars(&f, p.black_level);
+            let (_, s) = sample_edges(f.data, f.pitch, f.w, f.h, p, bars);
+            err(avg(&s.top), pic(0.0))
+        };
+
+        println!("
+error = average colour error of the top LEDs vs the picture's own edge (0 = perfect, lower is better)");
+        println!("leak  = brightness a dark scene's top LEDs gain from the picture inside (0 = none)");
+        println!("flick = average LED change when a bright HUD block moves 4 px along the top edge (lower = steadier)
+");
+        println!("depth level | black  lifted  grey24 | pillar  boxed | night | leak(dark) | flick(game)");
+        // black sky on top with a lit ground below: the LEDs above the sky should stay dark
+        let night = frame(w, h, |_, y| if y < 27 { (2, 2, 2) } else { (70, 80, 60) });
+        for depth in [10u8, 12, 15, 18] {
+            for level in [18u8, 22, 26, 30] {
+                let p = EdgeParams { depth_pct: depth, skip_black_bars: true, black_level: level, reverse: false, edge_number: 3 };
+                // pillar / boxed errors use the left strip vs the picture's mid colour
+                let side_err = |d: &Vec<u8>| -> f32 {
+                    let f = view(d, w, h);
+                    let bars = detect_bars(&f, level);
+                    let (_, s) = sample_edges(f.data, f.pitch, f.w, f.h, &p, bars);
+                    err(avg(&s.left), pic(0.5))
+                };
+                // dark-scene leak: top LED brightness minus the true edge (6)
+                let leak = {
+                    let f = view(&f_dark, w, h);
+                    let bars = detect_bars(&f, level);
+                    let (_, s) = sample_edges(f.data, f.pitch, f.w, f.h, &p, bars);
+                    avg(&s.top).0 - 6.0
+                };
+                // game HUD flicker: white block 12x6 sliding along the top edge of a colourful scene
+                let flick = {
+                    let scene = |bx: usize| frame(w, h, move |x, y| if (2..8).contains(&y) && x >= bx && x < bx + 12 { (255, 255, 255) } else { pic(y as f32 / 90.0) });
+                    let mut total = 0.0f32;
+                    let mut n = 0.0f32;
+                    let mut prev: Option<Vec<[u8; 3]>> = None;
+                    for bx in (0..140).step_by(4) {
+                        let d = scene(bx);
+                        let f = view(&d, w, h);
+                        let (_, s) = sample_edges(f.data, f.pitch, f.w, f.h, &p, detect_bars(&f, level));
+                        if let Some(pv) = &prev {
+                            let m = s.top.iter().zip(pv).map(|(a, b)| (a[0] as i32 - b[0] as i32).abs()).max().unwrap_or(0) as f32;
+                            total += m;
+                            n += 1.0;
+                        }
+                        prev = Some(s.top);
+                    }
+                    total / n
+                };
+                let night_leak = {
+                    let f = view(&night, w, h);
+                    let (_, s) = sample_edges(f.data, f.pitch, f.w, f.h, &p, detect_bars(&f, level));
+                    avg(&s.top).0 - 2.0
+                };
+                println!(
+                    "{:>5} {:>5} | {:>5.1} {:>7.1} {:>7.1} | {:>6.1} {:>6.1} | {:>5.1} | {:>10.1} | {:>10.1}",
+                    depth, level, top_err(&a, &p), top_err(&b, &p), top_err(&c, &p), side_err(&d), side_err(&e), night_leak, leak, flick
+                );
+            }
+        }
+        // baseline: the old behaviour (no bar skipping, depth 12)
+        let old = EdgeParams { depth_pct: 12, skip_black_bars: false, black_level: 18, reverse: false, edge_number: 3 };
+        println!("
+old behaviour (skipping off, depth 12): black {:.1}  lifted {:.1}  grey24 {:.1}", top_err(&a, &old), top_err(&b, &old), top_err(&c, &old));
     }
 
     #[test]
