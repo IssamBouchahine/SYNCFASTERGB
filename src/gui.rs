@@ -1,7 +1,8 @@
 use eframe::egui;
 
 use crate::capture::monitors::{self, MonitorInfo};
-use crate::ipc::LedView;
+use crate::color::extractor::{self, EdgeParams, Geometry};
+use crate::ipc::{FrameView, LedView};
 use crate::config::{self, Config, LedMode, RhythmSource, SoftEffect};
 use eframe::egui::Color32;
 
@@ -335,7 +336,7 @@ fn icon_hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
 /// --settings 모드 진입점
 pub fn run_settings_window() {
     // One settings window per session: a second launch just focuses the first.
-    let Some(_settings_guard) = crate::single::acquire("Local\\SYNCFASTERGB_Settings") else {
+    let Some(_settings_guard) = crate::single::acquire(crate::single::SETTINGS_MUTEX) else {
         crate::single::focus_window(SETTINGS_TITLE);
         return;
     };
@@ -487,6 +488,69 @@ struct SettingsGui {
     strip_present: bool,
     engine_running: bool,
     confirm_forget: bool,
+    // live picture for the detection-area illustration
+    frame_view: Option<FrameView>,
+    frame_seq: u32,
+    frame: Option<FrameData>,
+    frame_tex: Option<egui::TextureHandle>,
+    frame_at: f64,
+    last_frame_try: f64,
+    demo: FrameData,
+    demo_tex: Option<egui::TextureHandle>,
+    /// Which strip edge is being dragged: 0 top, 1 bottom, 2 left, 3 right.
+    drag_edge: Option<u8>,
+}
+
+/// A small picture (BGRA) with the black bars the engine is skipping.
+struct FrameData {
+    w: usize,
+    h: usize,
+    bars: (usize, usize, usize, usize),
+    bgra: Vec<u8>,
+}
+
+fn bgra_to_image(w: usize, h: usize, bgra: &[u8]) -> egui::ColorImage {
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for px in bgra.as_chunks::<4>().0 {
+        rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+    }
+    egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba)
+}
+
+/// Example letterboxed picture shown when the engine has no live frame to share.
+fn demo_frame() -> FrameData {
+    let (w, h) = (160usize, 90usize);
+    let mut bgra = vec![255u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let bar = !(8..82).contains(&y);
+            let t = (y as f32 - 8.0).max(0.0) / 74.0;
+            let (dx, dy) = (x as f32 - 112.0, y as f32 - 34.0);
+            let sun = (1.0 - ((dx * dx + dy * dy).sqrt() / 20.0)).clamp(0.0, 1.0);
+            let r = (60.0 + 150.0 * t + 190.0 * sun).min(255.0) as u8;
+            let g = (90.0 + 60.0 * t + 150.0 * sun).min(255.0) as u8;
+            let b = (200.0 - 140.0 * t + 40.0 * sun).clamp(0.0, 255.0) as u8;
+            let (r, g, b) = if bar { (0, 0, 0) } else { (r, g, b) };
+            let o = (y * w + x) * 4;
+            bgra[o] = b;
+            bgra[o + 1] = g;
+            bgra[o + 2] = r;
+        }
+    }
+    FrameData { w, h, bars: (8, 8, 0, 0), bgra }
+}
+
+/// New detection depth (percent) when a strip's inner edge is dragged to the pointer at
+/// (`fx`, `fy`) in picture coordinates. `edge`: 0 top, 1 bottom, 2 left, 3 right.
+fn drag_depth_pct(edge: u8, fx: f32, fy: f32, g: &Geometry, fw: usize, fh: usize) -> u8 {
+    let (fw, fh) = (fw as f32, fh as f32);
+    let pct = match edge {
+        0 => (fy - g.t as f32) / fh,
+        1 => ((fh - g.b as f32) - fy) / fh,
+        2 => (fx - g.l as f32) / fw,
+        _ => ((fw - g.r as f32) - fx) / fw,
+    } * 100.0;
+    if pct.is_nan() { 12 } else { pct.round().clamp(3.0, 40.0) as u8 }
 }
 
 /// Is the strip's LED interface visible on the USB bus right now? (cheap, no device is opened)
@@ -529,6 +593,15 @@ impl SettingsGui {
             strip_present: false,
             engine_running: false,
             confirm_forget: false,
+            frame_view: None,
+            frame_seq: 0,
+            frame: None,
+            frame_tex: None,
+            frame_at: -10.0,
+            last_frame_try: -10.0,
+            demo: demo_frame(),
+            demo_tex: None,
+            drag_edge: None,
         }
     }
 
@@ -550,6 +623,28 @@ impl SettingsGui {
                     self.last_seq = seq;
                     self.live = leds;
                     self.last_live_at = now;
+                }
+            }
+        }
+        if self.demo_tex.is_none() {
+            let d = &self.demo;
+            self.demo_tex = Some(ctx.load_texture("detect_demo", bgra_to_image(d.w, d.h, &d.bgra), egui::TextureOptions::LINEAR));
+        }
+        if self.frame_view.is_none() && now - self.last_frame_try > 1.0 {
+            self.last_frame_try = now;
+            self.frame_view = FrameView::open();
+        }
+        if let Some(v) = &self.frame_view {
+            if let Some(snap) = v.read() {
+                if snap.seq != self.frame_seq {
+                    self.frame_seq = snap.seq;
+                    let img = bgra_to_image(snap.w, snap.h, &snap.bgra);
+                    match self.frame_tex.as_mut() {
+                        Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                        None => self.frame_tex = Some(ctx.load_texture("detect_live", img, egui::TextureOptions::LINEAR)),
+                    }
+                    self.frame = Some(FrameData { w: snap.w, h: snap.h, bars: snap.bars, bgra: snap.bgra });
+                    self.frame_at = now;
                 }
             }
         }
@@ -859,6 +954,7 @@ impl SettingsGui {
 
         // Detection area: how deep the LEDs look, and black-bar handling
         section(ui, "Detection area", |ui| {
+            self.draw_detection_illustration(ui);
             let mut ch = false;
             let mut depth = self.config.sync.edge_depth_pct as f32;
             if slider_row(ui, "Depth from the screen edge", &mut depth, 3.0, 40.0, " %", 0) {
@@ -1190,6 +1286,146 @@ impl SettingsGui {
             }
         });
 
+    }
+}
+
+// ── Detection area illustration ──
+
+impl SettingsGui {
+    /// Live picture with the skipped black bars tinted red and the sampled strips drawn in the
+    /// colors the LEDs receive. Drag the inner edge of a strip to change the depth.
+    fn draw_detection_illustration(&mut self, ui: &mut egui::Ui) {
+        let now = ui.input(|i| i.time);
+        let live = self.frame.is_some() && now - self.frame_at < 3.0;
+        let params = EdgeParams::from_sync(&self.config.sync);
+        let (fw, fh, geo, samples, tex_id) = {
+            let fd: &FrameData = match (&self.frame, live) {
+                (Some(f), true) => f,
+                _ => &self.demo,
+            };
+            let tex = if live { self.frame_tex.as_ref() } else { self.demo_tex.as_ref() };
+            let Some(tex) = tex else { return };
+            let bars = if self.config.sync.skip_black_bars { fd.bars } else { (0, 0, 0, 0) };
+            let (geo, samples) = extractor::sample_edges(&fd.bgra, fd.w * 4, fd.w, fd.h, &params, bars);
+            (fd.w, fd.h, geo, samples, tex.id())
+        };
+
+        let avail = ui.available_width();
+        let scale = (avail / fw as f32).min(250.0 / fh as f32);
+        let (outer, resp) = ui.allocate_exact_size(egui::vec2(avail, fh as f32 * scale), egui::Sense::click_and_drag());
+        let rect = egui::Rect::from_center_size(outer.center(), egui::vec2(fw as f32 * scale, fh as f32 * scale));
+        let painter = ui.painter().clone();
+        let px = |x: usize| rect.left() + x as f32 * scale;
+        let py = |y: usize| rect.top() + y as f32 * scale;
+
+        painter.image(tex_id, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+
+        // black bars being ignored
+        let red = Color32::from_rgba_unmultiplied(255, 70, 70, 95);
+        let bar = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            if x1 - x0 > 0.5 && y1 - y0 > 0.5 {
+                painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)), 0.0, red);
+            }
+        };
+        bar(rect.left(), rect.top(), rect.right(), py(geo.t));
+        bar(rect.left(), py(fh - geo.b), rect.right(), rect.bottom());
+        bar(rect.left(), py(geo.t), px(geo.l), py(fh - geo.b));
+        bar(px(fw - geo.r), py(geo.t), rect.right(), py(fh - geo.b));
+
+        // sampled strips, colored with what each LED segment receives
+        let cell = |c: [u8; 3]| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 225);
+        let (l, t, cw, ch) = (geo.l, geo.t, geo.cw, geo.ch);
+        let fill = |x0: f32, y0: f32, x1: f32, y1: f32, c: [u8; 3]| {
+            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)).shrink(0.3), 0.0, cell(c));
+        };
+        for (i, c) in samples.top.iter().enumerate() {
+            fill(px(l + cw * i / geo.segs_x), py(t), px(l + cw * (i + 1) / geo.segs_x), py(t + geo.depth_y), *c);
+        }
+        for (i, c) in samples.bottom.iter().enumerate() {
+            fill(px(l + cw * i / geo.segs_x), py(fh - geo.b - geo.depth_y), px(l + cw * (i + 1) / geo.segs_x), py(fh - geo.b), *c);
+        }
+        for (i, c) in samples.left.iter().enumerate() {
+            fill(px(l), py(t + ch * i / geo.segs_y), px(l + geo.depth_x), py(t + ch * (i + 1) / geo.segs_y), *c);
+        }
+        for (i, c) in samples.right.iter().enumerate() {
+            fill(px(fw - geo.r - geo.depth_x), py(t + ch * i / geo.segs_y), px(fw - geo.r), py(t + ch * (i + 1) / geo.segs_y), *c);
+        }
+
+        // inner edges of the strips are the draggable handles
+        let top_in = py(t + geo.depth_y);
+        let bot_in = py(fh - geo.b - geo.depth_y);
+        let left_in = px(l + geo.depth_x);
+        let right_in = px(fw - geo.r - geo.depth_x);
+        let hit = |p: egui::Pos2| -> Option<u8> {
+            let tol = 9.0;
+            let in_x = p.x >= px(l) - tol && p.x <= px(fw - geo.r) + tol;
+            let in_y = p.y >= py(t) - tol && p.y <= py(fh - geo.b) + tol;
+            [(0u8, (p.y - top_in).abs(), in_x), (1, (p.y - bot_in).abs(), in_x), (2, (p.x - left_in).abs(), in_y), (3, (p.x - right_in).abs(), in_y)]
+                .iter()
+                .filter(|c| c.2 && c.1 <= tol)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|c| c.0)
+        };
+        if resp.drag_started() {
+            self.drag_edge = resp.interact_pointer_pos().and_then(hit);
+            log::debug!(
+                "illustration drag started at {:?}: edge {:?} (inner edges top {:.0} bottom {:.0} left {:.0} right {:.0})",
+                resp.interact_pointer_pos(), self.drag_edge, top_in, bot_in, left_in, right_in
+            );
+        }
+        let active = if resp.dragged() { self.drag_edge } else { resp.hover_pos().and_then(hit) };
+        if resp.drag_stopped() {
+            self.drag_edge = None;
+        }
+        if resp.dragged() {
+            if let (Some(edge), Some(p)) = (self.drag_edge, resp.interact_pointer_pos()) {
+                let pct = drag_depth_pct(edge, (p.x - rect.left()) / scale, (p.y - rect.top()) / scale, &geo, fw, fh);
+                if pct != self.config.sync.edge_depth_pct {
+                    self.config.sync.edge_depth_pct = pct;
+                    self.dirty = true;
+                }
+            }
+        }
+        if let Some(e) = active {
+            ui.ctx().set_cursor_icon(if e < 2 { egui::CursorIcon::ResizeVertical } else { egui::CursorIcon::ResizeHorizontal });
+        }
+
+        // outline each strip, light up the active edge, and mark all four handles
+        let line = |a: egui::Pos2, b: egui::Pos2, on: bool| {
+            let w = if on { 2.5_f32 } else { 1.0_f32 };
+            painter.line_segment([a, b], egui::Stroke::new(w, if on { Color32::WHITE } else { theme::ACCENT }));
+        };
+        let (x0, x1, y0, y1) = (px(l), px(fw - geo.r), py(t), py(fh - geo.b));
+        line(egui::pos2(x0, top_in), egui::pos2(x1, top_in), active == Some(0));
+        line(egui::pos2(x0, bot_in), egui::pos2(x1, bot_in), active == Some(1));
+        line(egui::pos2(left_in, y0), egui::pos2(left_in, y1), active == Some(2));
+        line(egui::pos2(right_in, y0), egui::pos2(right_in, y1), active == Some(3));
+        painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, theme::BORDER));
+        for (e, pos) in [
+            (0u8, egui::pos2((x0 + x1) / 2.0, top_in)),
+            (1, egui::pos2((x0 + x1) / 2.0, bot_in)),
+            (2, egui::pos2(left_in, (y0 + y1) / 2.0)),
+            (3, egui::pos2(right_in, (y0 + y1) / 2.0)),
+        ] {
+            let r = if active == Some(e) { 6.5 } else { 4.5 };
+            painter.circle_filled(pos, r, Color32::WHITE);
+            painter.circle_stroke(pos, r, egui::Stroke::new(1.5_f32, theme::ACCENT));
+        }
+
+        ui.vertical_centered(|ui| {
+            let msg = if live {
+                "Live picture from your screen"
+            } else {
+                "Example picture (shown when the engine is idle or not running)"
+            };
+            ui.label(egui::RichText::new(msg).size(11.5).color(theme::MUTED));
+        });
+        ui.label(
+            egui::RichText::new("Red = black bars being ignored. Colored strips = what each LED averages. Drag a strip's inner edge to change the depth.")
+                .size(11.5)
+                .color(theme::MUTED),
+        );
+        ui.add_space(8.0);
     }
 }
 
@@ -1529,4 +1765,54 @@ fn effect_button(ui: &mut egui::Ui, name: &str, color: Color32, selected: bool, 
         if selected { theme::TEXT } else { theme::MUTED },
     );
     resp.clicked()
+}
+
+// drag-math tests live next to the helper
+#[cfg(test)]
+mod illustration_tests {
+    use super::*;
+    use crate::color::extractor::geometry;
+
+    fn geo(depth: u8, bars: (usize, usize, usize, usize)) -> Geometry {
+        let p = EdgeParams { depth_pct: depth, skip_black_bars: true, black_level: 18, reverse: false, edge_number: 3 };
+        geometry(160, 90, &p, bars)
+    }
+
+    #[test]
+    fn dragging_each_edge_maps_to_a_percentage() {
+        let g = geo(12, (0, 0, 0, 0));
+        // 9 lines down from the top edge of a 90-line picture = 10%
+        assert_eq!(drag_depth_pct(0, 80.0, 9.0, &g, 160, 90), 10);
+        assert_eq!(drag_depth_pct(1, 80.0, 81.0, &g, 160, 90), 10);
+        // 16 columns in from the left of a 160-column picture = 10%
+        assert_eq!(drag_depth_pct(2, 16.0, 45.0, &g, 160, 90), 10);
+        assert_eq!(drag_depth_pct(3, 144.0, 45.0, &g, 160, 90), 10);
+    }
+
+    #[test]
+    fn dragging_is_measured_from_inside_the_black_bars() {
+        let g = geo(12, (8, 8, 0, 0));
+        // the strip starts below the 8-line bar: pointer at line 8+9 = 10%
+        assert_eq!(drag_depth_pct(0, 80.0, 17.0, &g, 160, 90), 10);
+        assert_eq!(drag_depth_pct(1, 80.0, 90.0 - 8.0 - 9.0, &g, 160, 90), 10);
+    }
+
+    #[test]
+    fn dragging_is_clamped_and_never_nan() {
+        let g = geo(12, (0, 0, 0, 0));
+        assert_eq!(drag_depth_pct(0, 0.0, -500.0, &g, 160, 90), 3);
+        assert_eq!(drag_depth_pct(0, 0.0, 5000.0, &g, 160, 90), 40);
+        assert_eq!(drag_depth_pct(2, f32::NAN, 0.0, &g, 160, 90), 12);
+    }
+
+    #[test]
+    fn demo_picture_is_a_valid_letterboxed_frame() {
+        let d = demo_frame();
+        assert_eq!(d.bgra.len(), d.w * d.h * 4);
+        assert_eq!(d.bars, (8, 8, 0, 0));
+        // bar rows are black, picture rows are not
+        assert_eq!(&d.bgra[0..3], &[0, 0, 0]);
+        let mid = (45 * d.w + 80) * 4;
+        assert!(d.bgra[mid..mid + 3].iter().any(|&v| v > 40));
+    }
 }

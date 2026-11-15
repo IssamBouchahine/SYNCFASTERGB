@@ -20,6 +20,7 @@ hobby project, so there is no guaranteed turnaround.
 | Network | None. CI bans HTTP/TLS/socket crates (`cargo-deny`). |
 | Privilege | Never requires admin; never spawns elevated processes or shells. |
 | Screen content | Downscaled in memory; never written to disk or logged. |
+| Live picture | While (and only while) the settings window is open, the engine shares a small copy of the screen picture (at most 192x192 pixels) with it through same-user shared memory, so the window can show where the LEDs sample. It is never written to disk or sent anywhere, and sharing stops when the window closes. |
 | Live preview | The settings window reads the strip colors (at most 255 RGB values, not screen pixels) from a same-user shared-memory block; never written to disk or sent anywhere. |
 | Strip power | Whole-strip power budget (default 40%, hard cap 80%); the app lowers it itself if the strip drops off the bus under load. |
 | Settings | Stored in the per-user registry, not a file; size-capped, parsed strictly, every value range-clamped. The program creates no files. |

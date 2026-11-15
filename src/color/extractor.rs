@@ -32,7 +32,7 @@ pub struct EdgeParams {
 }
 
 impl EdgeParams {
-    fn from_sync(s: &SyncConfig) -> Self {
+    pub fn from_sync(s: &SyncConfig) -> Self {
         Self {
             depth_pct: s.edge_depth_pct,
             skip_black_bars: s.skip_black_bars,
@@ -137,42 +137,92 @@ fn detect_bars(f: &Frame, black_level: u8) -> (usize, usize, usize, usize) {
     (top, bottom, left, right)
 }
 
-/// Strip colors in the order they run along the LED strip.
+/// Where the sampled strips are, in frame pixels. Used by the sampler AND by the settings
+/// window's illustration, so what is drawn is exactly what is sampled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Geometry {
+    /// Black bars actually skipped (top, bottom, left, right), after sanity checks.
+    pub t: usize,
+    pub b: usize,
+    pub l: usize,
+    pub r: usize,
+    /// Size of the content rectangle inside the bars.
+    pub cw: usize,
+    pub ch: usize,
+    /// Strip thickness.
+    pub depth_x: usize,
+    pub depth_y: usize,
+    /// Number of color segments along a horizontal / vertical strip.
+    pub segs_x: usize,
+    pub segs_y: usize,
+}
+
 /// `bars` = (top, bottom, left, right) lines to skip before sampling.
-fn edge_colors(f: &Frame, p: &EdgeParams, bars: (usize, usize, usize, usize)) -> Vec<Rgb> {
+pub fn geometry(w: usize, h: usize, p: &EdgeParams, bars: (usize, usize, usize, usize)) -> Geometry {
     let (mut t, mut b, mut l, mut r) = if p.skip_black_bars { bars } else { (0, 0, 0, 0) };
     // Degenerate result (bars eat the picture): ignore them.
-    if t + b + 4 > f.h || l + r + 4 > f.w {
+    if t + b + 4 > h || l + r + 4 > w {
         (t, b, l, r) = (0, 0, 0, 0);
     }
-    let (cw, ch) = (f.w - l - r, f.h - t - b); // content rectangle
-    let depth_y = (f.h * p.depth_pct as usize / 100).clamp(1, (ch / 2).max(1));
-    let depth_x = (f.w * p.depth_pct as usize / 100).clamp(1, (cw / 2).max(1));
-
+    let (cw, ch) = (w - l - r, h - t - b);
+    let depth_y = (h * p.depth_pct as usize / 100).clamp(1, (ch / 2).max(1));
+    let depth_x = (w * p.depth_pct as usize / 100).clamp(1, (cw / 2).max(1));
     // Finer than the old 16x9 grid so 70+ LEDs each get their own color.
     let segs_x = if cw >= 64 { 32 } else { 16.min(cw.max(1)) };
     let segs_y = if ch >= 36 { 18 } else { 9.min(ch.max(1)) };
+    Geometry { t, b, l, r, cw, ch, depth_x, depth_y, segs_x, segs_y }
+}
 
-    let strip_h = |y0: usize, y1: usize| -> Vec<Rgb> {
-        (0..segs_x)
-            .map(|i| f.avg(l + cw * i / segs_x, y0, l + cw * (i + 1) / segs_x, y1))
+/// The sampled colors of each strip in natural order (top/bottom left to right,
+/// left/right top to bottom).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EdgeSamples {
+    pub top: Vec<[u8; 3]>,
+    pub bottom: Vec<[u8; 3]>,
+    pub left: Vec<[u8; 3]>,
+    pub right: Vec<[u8; 3]>,
+}
+
+/// Sample the four strips of a BGRA frame.
+pub fn sample_edges(
+    data: &[u8],
+    pitch: usize,
+    w: usize,
+    h: usize,
+    p: &EdgeParams,
+    bars: (usize, usize, usize, usize),
+) -> (Geometry, EdgeSamples) {
+    let f = Frame { data, pitch, w, h };
+    let g = geometry(w, h, p, bars);
+    let rgb = |c: Rgb| [c.r, c.g, c.b];
+    let strip_h = |y0: usize, y1: usize| -> Vec<[u8; 3]> {
+        (0..g.segs_x)
+            .map(|i| rgb(f.avg(g.l + g.cw * i / g.segs_x, y0, g.l + g.cw * (i + 1) / g.segs_x, y1)))
             .collect()
     };
-    let strip_v = |x0: usize, x1: usize| -> Vec<Rgb> {
-        (0..segs_y)
-            .map(|i| f.avg(x0, t + ch * i / segs_y, x1, t + ch * (i + 1) / segs_y))
+    let strip_v = |x0: usize, x1: usize| -> Vec<[u8; 3]> {
+        (0..g.segs_y)
+            .map(|i| rgb(f.avg(x0, g.t + g.ch * i / g.segs_y, x1, g.t + g.ch * (i + 1) / g.segs_y)))
             .collect()
     };
+    let samples = EdgeSamples {
+        top: strip_h(g.t, g.t + g.depth_y),
+        bottom: strip_h(h - g.b - g.depth_y, h - g.b),
+        left: strip_v(g.l, g.l + g.depth_x),
+        right: strip_v(w - g.r - g.depth_x, w - g.r),
+    };
+    (g, samples)
+}
 
-    let top = strip_h(t, t + depth_y);
-    let bottom = strip_h(f.h - b - depth_y, f.h - b);
-    let left = strip_v(l, l + depth_x);
-    let right = strip_v(f.w - r - depth_x, f.w - r);
-
+/// Strip colors in the order they run along the LED strip.
+fn edge_colors(f: &Frame, p: &EdgeParams, bars: (usize, usize, usize, usize)) -> Vec<Rgb> {
+    let (_, s) = sample_edges(f.data, f.pitch, f.w, f.h, p, bars);
+    let to_rgb = |v: Vec<[u8; 3]>| -> Vec<Rgb> { v.into_iter().map(|c| Rgb { r: c[0], g: c[1], b: c[2] }).collect() };
     let rev = |mut v: Vec<Rgb>| {
         v.reverse();
         v
     };
+    let (top, bottom, left, right) = (to_rgb(s.top), to_rgb(s.bottom), to_rgb(s.left), to_rgb(s.right));
     // Wiring order: left (bottom -> top), top (left -> right), right (top -> bottom),
     // [bottom (right -> left)]. `reverse` runs the strip the other way round.
     let mut out = Vec::new();
@@ -220,6 +270,13 @@ pub struct ColorExtractor {
     last_dims: (u32, u32),
     /// Black-bar thickness in use, stabilised over time so detection never flickers.
     bars: (usize, usize, usize, usize),
+}
+
+impl ColorExtractor {
+    /// Black bars currently being skipped (top, bottom, left, right), in frame lines.
+    pub fn bars(&self) -> (usize, usize, usize, usize) {
+        self.bars
+    }
 }
 
 impl ColorExtractor {
@@ -441,6 +498,24 @@ mod tests {
         let mut p4 = params(12, false);
         p4.edge_number = 4;
         assert!(edge_colors(&f, &p4, (0, 0, 0, 0)).len() > fwd.len(), "4 edges adds the bottom strip");
+    }
+
+    #[test]
+    fn geometry_matches_what_is_sampled_and_respects_bars() {
+        let d = letterboxed();
+        let f = view(&d, 160, 90);
+        let bars = detect_bars(&f, 18);
+        let (g, s) = sample_edges(f.data, f.pitch, f.w, f.h, &params(12, true), bars);
+        assert_eq!((g.t, g.b, g.l, g.r), (8, 8, 0, 0));
+        assert_eq!(g.ch, 90 - 16);
+        assert_eq!(g.depth_y, 90 * 12 / 100);
+        assert_eq!(s.top.len(), g.segs_x);
+        assert_eq!(s.left.len(), g.segs_y);
+        // the geometry never extends past the frame
+        assert!(g.t + g.depth_y <= 90 && g.l + g.depth_x <= 160);
+        // skipping off: the strips start at the very edge
+        let (g2, _) = sample_edges(f.data, f.pitch, f.w, f.h, &params(12, false), bars);
+        assert_eq!((g2.t, g2.b, g2.l, g2.r), (0, 0, 0, 0));
     }
 
     #[test]

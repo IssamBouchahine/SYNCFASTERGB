@@ -17,6 +17,9 @@ One self-contained `.exe`: tray app + settings window, no installer, no runtime 
 - Handles Windows **HDR** desktops (tone-mapped to SDR).
 - Smooth, time-based smoothing (fast attack, slower decay), live brightness slider, saturation,
   gamma and a per-LED power limit.
+- Adjustable **detection area**: how deep from the screen edge each LED looks, and automatic skipping of
+  black bars (letterboxed video). An interactive, live illustration of your screen shows the sampled strips
+  in the colors the LEDs receive; drag a strip's inner edge to change the depth.
 - Tray icon shows connection state. Settings apply live.
 
 Typical cost on an RTX 4060 laptop at 2560x1440, 30 fps: about 40 MB RAM, a few percent of one CPU core.

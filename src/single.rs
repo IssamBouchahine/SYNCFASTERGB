@@ -12,6 +12,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// Mutex held by the running tray app (the "engine").
 pub const APP_MUTEX: &str = "Local\\SYNCFASTERGB_App";
 
+/// Mutex held by the open settings window.
+pub const SETTINGS_MUTEX: &str = "Local\\SYNCFASTERGB_Settings";
+
 /// True if some process currently holds the named mutex.
 pub fn is_held(name: &str) -> bool {
     acquire(name).is_none()

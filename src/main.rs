@@ -240,6 +240,10 @@ fn capture_loop(
     // (2026-10-14 로그: 5시간 동안 19,355회 반복돼 7.5MB)
     let mut access_lost_since: Option<Instant> = None;
     let mut access_lost_reinits = 0u32;
+    // The live picture for the settings window is shared only while that window is open.
+    let mut frame_share: Option<ipc::FrameShare> = None;
+    let mut viewer_open = false;
+    let mut last_viewer_check = Instant::now() - Duration::from_secs(10);
     // recovery bookkeeping
     let mut frames_since_create = 1u32; // the first capturer already exists
     let mut rapid_losses = 0u32;
@@ -274,6 +278,16 @@ fn capture_loop(
         if !active.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(100));
             continue;
+        }
+
+        if last_viewer_check.elapsed() >= Duration::from_secs(1) {
+            last_viewer_check = Instant::now();
+            viewer_open = single::is_held(single::SETTINGS_MUTEX);
+            if viewer_open && frame_share.is_none() {
+                frame_share = ipc::FrameShare::create();
+            } else if !viewer_open {
+                frame_share = None;
+            }
         }
 
         // Once a second: is a full-screen app (a game) focused on the captured monitor?
@@ -359,6 +373,11 @@ fn capture_loop(
                 let t_ext = Instant::now();
                 let colors = extractor.extract(&frame.data, frame.pitch, frame.width, frame.height);
                 stat_ext += t_ext.elapsed();
+                if viewer_open {
+                    if let Some(share) = frame_share.as_mut() {
+                        share.publish_bgra(&frame.data, frame.pitch as usize, frame.width as usize, frame.height as usize, extractor.bars());
+                    }
+                }
 
                 // 검정 화면 감지: 모든 LED 색상이 거의 검정인지 확인
                 const BLACK_SUM_THRESHOLD: u16 = 15;
