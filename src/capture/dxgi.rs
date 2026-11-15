@@ -170,7 +170,7 @@ impl ScreenCapture {
 
         // Lazily create GPU resources for the real desktop format; if the format changed
         // (HDR toggled) rebuild them.
-        if self.gpu_wanted && (self.gpu.is_none() && !self.gpu_tried || self.gpu.as_ref().map_or(false, |g| g.hdr != hdr)) {
+        if self.gpu_wanted && (self.gpu.is_none() && !self.gpu_tried || self.gpu.as_ref().is_some_and(|g| g.hdr != hdr)) {
             self.gpu_tried = true;
             let device = self._device.clone();
             match create_gpu_downscale(&device, self.width, self.height, hdr) {

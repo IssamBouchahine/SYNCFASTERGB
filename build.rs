@@ -75,8 +75,8 @@ fn rgba_to_bmp(rgba: &[u8], size: u32) -> Vec<u8> {
     }
 
     // AND mask (all zeros — alpha handles transparency)
-    let row_bytes = ((size + 31) / 32) * 4;
-    data.extend(std::iter::repeat(0u8).take((row_bytes * size) as usize));
+    let row_bytes = size.div_ceil(32) * 4;
+    data.extend(std::iter::repeat_n(0u8, (row_bytes * size) as usize));
     data
 }
 

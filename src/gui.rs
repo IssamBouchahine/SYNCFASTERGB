@@ -1220,7 +1220,7 @@ fn effect_grid(ui: &mut egui::Ui, id: &str, names: &[&str], colors: &[Color32], 
 }
 
 fn effect_button(ui: &mut egui::Ui, name: &str, color: Color32, selected: bool) -> bool {
-    let w = ((ui.available_width() - 20.0) / 3.0).max(110.0).min(170.0);
+    let w = ((ui.available_width() - 20.0) / 3.0).clamp(110.0, 170.0);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 54.0), egui::Sense::click());
 
     let bg = if selected {

@@ -1,10 +1,10 @@
-/// RB/SC 프로토콜 패킷 빌더
-///
-/// RB 패킷: "RB"(2) + 길이(1) + 세션ID(1) + 액션(1) + 페이로드 + 체크섬(1)
-/// SC 패킷: "SC"(2) + 길이(2, BigEndian) + 세션ID(1) + 액션(1) + 데이터 + 체크섬(1)
-///
-/// USB HID 디바이스는 dedicated action code 프로토콜 사용 (MAC 없음, 짧은 패킷)
-/// BLE/Dongle은 notSyncEffect 래퍼 사용 (20바이트, MAC 포함) — 여기서는 USB HID만 지원
+//! RB/SC 프로토콜 패킷 빌더
+//!
+//! RB 패킷: "RB"(2) + 길이(1) + 세션ID(1) + 액션(1) + 페이로드 + 체크섬(1)
+//! SC 패킷: "SC"(2) + 길이(2, BigEndian) + 세션ID(1) + 액션(1) + 데이터 + 체크섬(1)
+//!
+//! USB HID 디바이스는 dedicated action code 프로토콜 사용 (MAC 없음, 짧은 패킷)
+//! BLE/Dongle은 notSyncEffect 래퍼 사용 (20바이트, MAC 포함) — 여기서는 USB HID만 지원
 
 const HEADER_RB: &[u8] = b"RB";
 const MAX_CHUNK_SIZE: usize = 64;
@@ -23,6 +23,7 @@ mod action {
 
 /// wireMap: LED 디바이스의 색상 채널 순서
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(clippy::upper_case_acronyms)] // names mirror the on-wire channel order
 pub enum WireMap {
     RGB,
     RBG,

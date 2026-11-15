@@ -117,7 +117,7 @@ fn init_logging() {
     if !std::env::args().any(|a| a == "--console") {
         if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
             let path = dir.join("syncrgb.log");
-            if std::fs::metadata(&path).map_or(false, |m| m.len() > 1_000_000) {
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1_000_000) {
                 let _ = std::fs::rename(&path, dir.join("syncrgb.log.old"));
             }
             if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
@@ -296,7 +296,7 @@ fn capture_loop(
                 std::thread::sleep(Duration::from_secs(1));
                 access_lost_reinits += 1;
                 if let Err(e) = capturer.reinitialize(&capture_cfg) {
-                    if access_lost_reinits == 1 || access_lost_reinits % 300 == 0 {
+                    if access_lost_reinits == 1 || access_lost_reinits.is_multiple_of(300) {
                         log::error!("재초기화 실패 ({}회): {}", access_lost_reinits, e);
                     }
                 }
@@ -385,6 +385,7 @@ fn handle_write_failure(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sender_loop(
     config: Config,
     running: Arc<AtomicBool>,
@@ -1028,15 +1029,15 @@ impl ApplicationHandler for TrayApp {
         }
 
         self.tick_counter += 1;
-        if self.tick_counter % 10 == 0 {
+        if self.tick_counter.is_multiple_of(10) {
             if let Ok(meta) = std::fs::metadata(&self.config_path) {
                 if let Ok(mtime) = meta.modified() {
-                    if self.last_mtime.map_or(true, |prev| mtime != prev) {
+                    if self.last_mtime != Some(mtime) {
                         self.last_mtime = Some(mtime);
                         self.config_version.fetch_add(1, Ordering::Relaxed);
 
                         let new_locale = gui::detect_locale();
-                        if new_locale as *const _ != self.locale as *const _ {
+                        if !std::ptr::eq(new_locale, self.locale) {
                             self.locale = new_locale;
                             if let Some(ref t) = self.toggle_item {
                                 if self.active.load(Ordering::Relaxed) {

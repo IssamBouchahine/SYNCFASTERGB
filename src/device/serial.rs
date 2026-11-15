@@ -60,7 +60,7 @@ thread_local! {
 }
 
 fn inter_chunk_pause() {
-    let slept = GAP_TIMER.with(|t| t.as_ref().map_or(false, |t| t.wait_us(INTER_CHUNK_GAP_US)));
+    let slept = GAP_TIMER.with(|t| t.as_ref().is_some_and(|t| t.wait_us(INTER_CHUNK_GAP_US)));
     if slept {
         return;
     }

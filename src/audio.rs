@@ -1,6 +1,6 @@
-/// Windows WASAPI 오디오 피크 미터
-/// IAudioMeterInformation으로 시스템 출력 볼륨 레벨을 읽음 (0.0 ~ 1.0)
-/// 원본 SyncLight와 동일: 노이즈 게이트(≤0.01→0), 스무딩 없이 원시값 전송
+//! Windows WASAPI 오디오 피크 미터
+//! IAudioMeterInformation으로 시스템 출력 볼륨 레벨을 읽음 (0.0 ~ 1.0)
+//! 원본 SyncLight와 동일: 노이즈 게이트(≤0.01→0), 스무딩 없이 원시값 전송
 
 use windows::Win32::Media::Audio::{
     eRender, eConsole,

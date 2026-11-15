@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Default)]
 pub struct Config {
     #[serde(default)]
     pub device: DeviceConfig,
@@ -73,7 +74,9 @@ pub struct SyncConfig {
 /// LED 동작 모드
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum LedMode {
+    #[default]
     Sync,
     Dynamic,
     Sound,
@@ -81,47 +84,41 @@ pub enum LedMode {
     Off,
 }
 
-impl Default for LedMode {
-    fn default() -> Self { Self::Sync }
-}
 
 /// 음악 반응 소스
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RhythmSource {
+    #[default]
     Controller,
     Computer,
 }
 
-impl Default for RhythmSource {
-    fn default() -> Self { Self::Controller }
-}
 
 /// UI 언어
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Language {
+    #[default]
     Auto,
     En,
     Ko,
 }
 
-impl Default for Language {
-    fn default() -> Self { Self::Auto }
-}
 
 /// 소프트웨어 동적 효과 (단색)
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SoftEffect {
+    #[default]
     None,
     Breathe,
     Rotate,
 }
 
-impl Default for SoftEffect {
-    fn default() -> Self { Self::None }
-}
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EffectConfig {
@@ -333,67 +330,6 @@ impl Default for SyncConfig {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            device: DeviceConfig::default(),
-            capture: CaptureConfig::default(),
-            sync: SyncConfig::default(),
-            effect: EffectConfig::default(),
-            app: AppConfig::default(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn empty_config_uses_defaults() {
-        let c: Config = toml::from_str("").unwrap();
-        assert_eq!(c.device.lamps_amount, 65);
-        assert_eq!(c.capture.fps, 30);
-    }
-
-    #[test]
-    fn sanitize_clamps_dangerous_values() {
-        let mut c: Config = toml::from_str(
-            "[device]\nlamps_amount = 100000\n[capture]\nfps = 0\n[sync]\ngamma = nan\nedge_number = 9\ncompression_limit = 0\nattack_ms = -5.0",
-        )
-        .unwrap();
-        c.sanitize();
-        assert_eq!(c.device.lamps_amount, 255);
-        assert_eq!(c.capture.fps, 10);
-        assert_eq!(c.sync.gamma, 1.0);
-        assert_eq!(c.sync.edge_number, 3);
-        assert_eq!(c.sync.compression_limit, 30);
-        assert_eq!(c.sync.attack_ms, 0.0);
-    }
-
-    #[test]
-    fn oversized_config_file_is_rejected() {
-        let dir = std::env::temp_dir().join("syncfastergb_cfg_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("big.toml");
-        std::fs::write(&p, "#".repeat(70 * 1024)).unwrap();
-        assert!(Config::load(&p).is_err());
-        let _ = std::fs::remove_file(&p);
-    }
-
-    #[test]
-    fn partial_config_is_accepted() {
-        let c: Config = toml::from_str("[device]
-lamps_amount = 71
-[capture]
-monitor_name = \"dp\"").unwrap();
-        assert_eq!(c.device.lamps_amount, 71);
-        assert_eq!(c.device.display_size, 27);
-        assert_eq!(c.capture.monitor_name, "dp");
-        assert_eq!(c.capture.sample_width, 50);
-    }
-}
-
 // ── 자동 시작 (레지스트리) ──
 
 const REG_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -454,5 +390,55 @@ pub fn is_autostart_enabled() -> bool {
         }
     }
     true
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_config_uses_defaults() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.device.lamps_amount, 65);
+        assert_eq!(c.capture.fps, 30);
+    }
+
+    #[test]
+    fn sanitize_clamps_dangerous_values() {
+        let mut c: Config = toml::from_str(
+            "[device]\nlamps_amount = 100000\n[capture]\nfps = 0\n[sync]\ngamma = nan\nedge_number = 9\ncompression_limit = 0\nattack_ms = -5.0",
+        )
+        .unwrap();
+        c.sanitize();
+        assert_eq!(c.device.lamps_amount, 255);
+        assert_eq!(c.capture.fps, 10);
+        assert_eq!(c.sync.gamma, 1.0);
+        assert_eq!(c.sync.edge_number, 3);
+        assert_eq!(c.sync.compression_limit, 30);
+        assert_eq!(c.sync.attack_ms, 0.0);
+    }
+
+    #[test]
+    fn oversized_config_file_is_rejected() {
+        let dir = std::env::temp_dir().join("syncfastergb_cfg_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("big.toml");
+        std::fs::write(&p, "#".repeat(70 * 1024)).unwrap();
+        assert!(Config::load(&p).is_err());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn partial_config_is_accepted() {
+        let c: Config = toml::from_str("[device]
+lamps_amount = 71
+[capture]
+monitor_name = \"dp\"").unwrap();
+        assert_eq!(c.device.lamps_amount, 71);
+        assert_eq!(c.device.display_size, 27);
+        assert_eq!(c.capture.monitor_name, "dp");
+        assert_eq!(c.capture.sample_width, 50);
+    }
 }
 

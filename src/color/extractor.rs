@@ -1,13 +1,13 @@
-/// 화면 가장자리에서 LED 색상 추출 — SyncLight 호환 파이프라인
-///
-/// 처리 흐름:
-/// 1. 화면을 cols×rows 그리드로 나눠 각 셀 평균 색상 계산
-/// 2. 가장자리 셀 추출 (상/우/하/좌)
-/// 3. LED 개수에 맞게 보간하여 매핑
-/// 4. 방향 반전
-/// 5. 시간축 스무딩 (최근 N 프레임 평균)
-/// 6. 채도 부스트 (HSL 기반)
-/// 7. 광량 압축 (R+G+B > 255 → 정규화)
+//! 화면 가장자리에서 LED 색상 추출 — SyncLight 호환 파이프라인
+//!
+//! 처리 흐름:
+//! 1. 화면을 cols×rows 그리드로 나눠 각 셀 평균 색상 계산
+//! 2. 가장자리 셀 추출 (상/우/하/좌)
+//! 3. LED 개수에 맞게 보간하여 매핑
+//! 4. 방향 반전
+//! 5. 시간축 스무딩 (최근 N 프레임 평균)
+//! 6. 채도 부스트 (HSL 기반)
+//! 7. 광량 압축 (R+G+B > 255 → 정규화)
 
 use super::pipeline::Smoother;
 use crate::config::SyncConfig;
@@ -82,15 +82,10 @@ fn capture_grid(data: &[u8], pitch: u32, width: u32, height: u32, cols: u32, row
                 y += step;
             }
 
-            if count > 0 {
-                grid.push(Rgb {
-                    r: (r_sum / count) as u8,
-                    g: (g_sum / count) as u8,
-                    b: (b_sum / count) as u8,
-                });
-            } else {
-                grid.push(Rgb { r: 0, g: 0, b: 0 });
-            }
+            grid.push(match (r_sum.checked_div(count), g_sum.checked_div(count), b_sum.checked_div(count)) {
+                (Some(r), Some(g), Some(b)) => Rgb { r: r as u8, g: g as u8, b: b as u8 },
+                _ => Rgb { r: 0, g: 0, b: 0 },
+            });
         }
     }
 

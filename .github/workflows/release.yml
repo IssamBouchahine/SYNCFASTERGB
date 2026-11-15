@@ -5,32 +5,51 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
+# No permissions by default; the release job asks for exactly what it needs.
+permissions: {}
 
 jobs:
-  build:
+  release:
     runs-on: windows-latest
+    permissions:
+      contents: write       # create the GitHub release
+      id-token: write       # sign build provenance
+      attestations: write   # publish build provenance
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Rust 툴체인 설치
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: 캐시
-        uses: actions/cache@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          persist-credentials: false
 
-      - name: 릴리스 빌드
-        run: cargo build --release
-
-      - name: GitHub Release 생성
-        uses: softprops/action-gh-release@v2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          files: target/release/syncfastergb.exe
+          toolchain: stable
+          components: clippy
+
+      - name: Gate on the same checks as CI
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+
+      - name: Build (locked)
+        run: cargo build --release --locked
+
+      - name: Checksum
+        shell: pwsh
+        run: |
+          Copy-Item target/release/syncfastergb.exe syncfastergb.exe
+          $hash = (Get-FileHash syncfastergb.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  syncfastergb.exe" | Out-File -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: syncfastergb.exe
+
+      - name: Publish release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            syncfastergb.exe
+            SHA256SUMS.txt
           generate_release_notes: true
