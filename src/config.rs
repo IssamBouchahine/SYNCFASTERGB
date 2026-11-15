@@ -398,7 +398,7 @@ monitor_name = \"dp\"").unwrap();
 
 const REG_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const REG_APPROVED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
-const REG_VALUE_NAME: &str = "SyncRGB";
+const REG_VALUE_NAME: &str = "SYNCFASTERGB";
 
 pub fn set_autostart(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
     use winreg::enums::*;

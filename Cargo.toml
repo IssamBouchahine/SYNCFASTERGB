@@ -1,8 +1,8 @@
 [package]
-name = "SyncRGB"
+name = "syncfastergb"
 version = "0.2.0"
 edition = "2021"
-description = "SyncRGB — 화면 색상을 USB LED에 동기화하는 경량 앱"
+description = "Lightweight screen-sync ambient lighting for USB HID LED strips"
 
 [dependencies]
 windows = { version = "0.58", features = [

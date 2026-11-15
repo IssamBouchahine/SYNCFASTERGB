@@ -52,7 +52,7 @@ fn main() {
         return;
     }
 
-    log::info!("SyncRGB 시작");
+    log::info!("SYNCFASTERGB starting");
 
     let locale = gui::detect_locale();
     let config = Config::load_or_default();
@@ -105,7 +105,7 @@ fn main() {
     running.store(false, Ordering::SeqCst);
     let _ = capture_thread.join();
     let _ = send_thread.join();
-    log::info!("SyncRGB 종료");
+    log::info!("SYNCFASTERGB stopped");
 }
 
 /// 로거 초기화. windows_subsystem="windows" 빌드에서 stderr는 유실되므로
@@ -832,7 +832,7 @@ fn spawn_shutdown_listener(
             // 종료 알림을 다른 앱보다 먼저 받아 LED 끄기 시간을 확보한다 (0x3FF = 최우선)
             let _ = SetProcessShutdownParameters(0x3FF, SHUTDOWN_NORETRY);
 
-            let class_name = windows::core::w!("SyncRGB_Shutdown");
+            let class_name = windows::core::w!("SYNCFASTERGB_Shutdown");
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(shutdown_wnd_proc),
                 lpszClassName: class_name,

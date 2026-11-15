@@ -7,8 +7,8 @@ fn main() {
 
     let mut res = winresource::WindowsResource::new();
     res.set_icon(&ico_path);
-    res.set("ProductName", "SyncRGB");
-    res.set("FileDescription", "SyncRGB LED 컨트롤러");
+    res.set("ProductName", "SYNCFASTERGB");
+    res.set("FileDescription", "SYNCFASTERGB screen-sync LED controller");
     res.compile().expect("리소스 컴파일 실패");
 }
 
