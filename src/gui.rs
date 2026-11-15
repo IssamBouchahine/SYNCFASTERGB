@@ -1075,6 +1075,13 @@ impl SettingsGui {
                 ch |= ui.add(egui::DragValue::new(&mut self.config.capture.fps).range(10..=60)).changed();
                 ui.end_row();
 
+                ui.label(egui::RichText::new("FPS in games").color(theme::MUTED));
+                ch |= ui
+                    .add(egui::DragValue::new(&mut self.config.capture.game_fps).range(10..=60))
+                    .on_hover_text("Capture rate while a full-screen app is focused. Lower = less impact on game performance.")
+                    .changed();
+                ui.end_row();
+
                 ui.label(egui::RichText::new("HDR white level").color(theme::MUTED));
                 ch |= ui
                     .add(egui::DragValue::new(&mut self.config.capture.hdr_sdr_white_nits).range(80.0..=1000.0).suffix(" nits"))

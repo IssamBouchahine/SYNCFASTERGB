@@ -29,6 +29,8 @@ pub struct DeviceConfig {
 #[serde(default)]
 pub struct CaptureConfig {
     pub fps: u32,
+    /// Frame rate while a full-screen app (a game) is focused: keeps the GPU/CPU free for it.
+    pub game_fps: u32,
     /// Global output index across ALL GPUs (see `--list-monitors`).
     pub monitor: u32,
     /// Optional case-insensitive substring of "<gpu> <display name>"; overrides `monitor` when set.
@@ -228,6 +230,7 @@ impl Config {
         self.device.lamps_amount = self.device.lamps_amount.clamp(1, 255);
         self.device.display_size = self.device.display_size.clamp(1, 200);
         self.capture.fps = self.capture.fps.clamp(10, 60);
+        self.capture.game_fps = self.capture.game_fps.clamp(10, 60);
         self.capture.sample_width = self.capture.sample_width.clamp(1, 500);
         self.capture.monitor_name.truncate(128);
         self.capture.hdr_sdr_white_nits = f(self.capture.hdr_sdr_white_nits, 80.0, 1000.0, 240.0);
@@ -318,7 +321,7 @@ impl Default for DeviceConfig {
 
 impl Default for CaptureConfig {
     fn default() -> Self {
-        Self { fps: 60, monitor: 0, monitor_name: String::new(), sample_width: 50, gpu_downscale: true, hdr_sdr_white_nits: 240.0 }
+        Self { fps: 60, game_fps: 30, monitor: 0, monitor_name: String::new(), sample_width: 50, gpu_downscale: true, hdr_sdr_white_nits: 240.0 }
     }
 }
 
@@ -413,6 +416,7 @@ mod tests {
         let c: Config = toml::from_str("").unwrap();
         assert_eq!(c.device.lamps_amount, 65);
         assert_eq!(c.capture.fps, 60);
+        assert_eq!(c.capture.game_fps, 30);
     }
 
     #[test]

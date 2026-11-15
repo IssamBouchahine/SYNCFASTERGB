@@ -3,6 +3,7 @@
 
 mod audio;
 mod capture;
+mod foreground;
 mod ipc;
 mod single;
 mod color;
@@ -65,6 +66,8 @@ fn main() {
             return;
         }
     };
+
+    lower_process_priority();
 
     log::info!("SYNCFASTERGB starting");
 
@@ -163,6 +166,11 @@ fn capture_loop(
     screen_black: Arc<AtomicBool>,
 ) {
     let mut frame_interval = Duration::from_millis(1000 / config.capture.fps as u64);
+    // Game mode: while a full-screen app is focused, capture at a lower rate.
+    let mut base_interval = frame_interval;
+    let mut game_interval = Duration::from_millis(1000 / config.capture.game_fps.max(1) as u64);
+    let mut game_mode = false;
+    let mut last_game_check = Instant::now() - Duration::from_secs(10);
     let mut turn_off_on_black = config.app.turn_off_on_black;
 
     // The monitor may not exist yet (unplugged, asleep, still enumerating): keep trying
@@ -195,6 +203,7 @@ fn capture_loop(
     let mut extractor = ColorExtractor::new(config.device.lamps_amount, &config.sync);
 
     log::info!("capture thread started ({} fps, {}x{})", config.capture.fps, first.width, first.height);
+    let mut mon_rect: Option<foreground::Rect4> = Some((first.origin.0, first.origin.1, first.origin.0 + first.width as i32, first.origin.1 + first.height as i32));
     let mut capturer: Option<ScreenCapture> = Some(first);
     let mut local_version = 0u32;
     // 검정 화면 연속 프레임 카운터 (1초 이상 검정이면 플래그 설정)
@@ -232,7 +241,9 @@ fn capture_loop(
         if current_version != local_version {
             local_version = current_version;
             let c = Config::load_or_default();
-            frame_interval = Duration::from_millis(1000 / c.capture.fps as u64);
+            base_interval = Duration::from_millis(1000 / c.capture.fps as u64);
+            game_interval = Duration::from_millis(1000 / c.capture.game_fps.max(1) as u64);
+            frame_interval = if game_mode { base_interval.max(game_interval) } else { base_interval };
             turn_off_on_black = c.app.turn_off_on_black;
             black_threshold_frames = c.capture.fps;
             extractor.update_config(c.device.lamps_amount, &c.sync);
@@ -247,6 +258,27 @@ fn capture_loop(
         if !active.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(100));
             continue;
+        }
+
+        // Once a second: is a full-screen app (a game) focused on the captured monitor?
+        if last_game_check.elapsed() >= Duration::from_secs(1) {
+            last_game_check = Instant::now();
+            if let Some(rect) = mon_rect {
+                let now_game = foreground::fullscreen_app_covering(rect);
+                if now_game != game_mode {
+                    game_mode = now_game;
+                    frame_interval = if game_mode { base_interval.max(game_interval) } else { base_interval };
+                    log::info!(
+                        "full-screen app {}: capturing at {} fps",
+                        if game_mode { "focused" } else { "closed" },
+                        1000 / frame_interval.as_millis().max(1)
+                    );
+                }
+            }
+        }
+        if game_mode {
+            // A full-screen game owns the screen: never treat a lost capture as a fault.
+            dead_since = None;
         }
 
         // (Re)create the capturer when there is none. Everything old has been dropped first.
@@ -266,6 +298,7 @@ fn capture_loop(
             match ScreenCapture::new(&capture_cfg) {
                 Ok(c) => {
                     log::info!("capture re-created ({}x{})", c.width, c.height);
+                    mon_rect = Some((c.origin.0, c.origin.1, c.origin.0 + c.width as i32, c.origin.1 + c.height as i32));
                     capturer = Some(c);
                     frames_since_create = 0;
                     create_failures = 0;
@@ -276,7 +309,7 @@ fn capture_loop(
                     if create_failures == 1 || create_failures.is_multiple_of(60) {
                         log::warn!("cannot re-create capture yet ({}); retrying (attempt {})", e, create_failures);
                     }
-                    if dead_since.is_some_and(|t| t.elapsed() >= WATCHDOG) && restarts < MAX_RESTARTS {
+                    if !game_mode && dead_since.is_some_and(|t| t.elapsed() >= WATCHDOG) && restarts < MAX_RESTARTS {
                         log::error!("capture dead for {} s: restarting the app", WATCHDOG.as_secs());
                         if relaunch_self(restarts) {
                             running.store(false, Ordering::SeqCst);
@@ -378,7 +411,7 @@ fn capture_loop(
                 // Drop every GPU object BEFORE building new ones.
                 capturer = None;
                 std::thread::sleep(Duration::from_millis(lost_backoff_ms(rapid_losses)));
-                if dead_since.is_some_and(|t| t.elapsed() >= WATCHDOG) && restarts < MAX_RESTARTS
+                if !game_mode && dead_since.is_some_and(|t| t.elapsed() >= WATCHDOG) && restarts < MAX_RESTARTS
                     && capture::dxgi::attach_input_desktop()
                 {
                     log::error!("capture dead for {} s: restarting the app", WATCHDOG.as_secs());
@@ -421,6 +454,15 @@ fn capture_loop(
         if elapsed < frame_interval {
             std::thread::sleep(frame_interval - elapsed);
         }
+    }
+}
+
+/// Run the engine below normal priority: a game's threads always win any CPU contention.
+fn lower_process_priority() {
+    use windows::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS};
+    // SAFETY: the pseudo-handle from GetCurrentProcess is always valid for this process.
+    unsafe {
+        let _ = SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
     }
 }
 

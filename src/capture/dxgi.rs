@@ -53,7 +53,12 @@ struct GpuDownscale {
     level: u32,
     small_w: u32,
     small_h: u32,
-    staging_small: ID3D11Texture2D,
+    /// Two tiny staging textures used ping-pong: this frame's copy is queued into one while the
+    /// previous frame's is read from the other, so the CPU never waits for a busy GPU.
+    staging: [ID3D11Texture2D; 2],
+    write_idx: usize,
+    /// A copy is in flight in `staging[write_idx ^ 1]`.
+    pending: bool,
     /// Desktop is FP16 scRGB (Windows HDR): read back floats and tone-map to SDR.
     hdr: bool,
 }
@@ -72,6 +77,8 @@ pub struct ScreenCapture {
     cache: Option<Frame>,
     pub width: u32,
     pub height: u32,
+    /// Top-left of the captured monitor in virtual-screen coordinates.
+    pub origin: (i32, i32),
 }
 
 impl ScreenCapture {
@@ -106,6 +113,11 @@ impl ScreenCapture {
             let device = device.ok_or("D3D11 device creation failed")?;
             let context = context.ok_or("D3D11 context creation failed")?;
 
+            // Lowest GPU scheduling priority: when a game saturates the GPU, its work goes first.
+            if let Ok(dxgi_device) = device.cast::<IDXGIDevice>() {
+                let _ = dxgi_device.SetGPUThreadPriority(-7);
+            }
+
             let output: IDXGIOutput = adapter.EnumOutputs(m.output_index)?;
             let output1: IDXGIOutput1 = output.cast()?;
             let duplication = output1.DuplicateOutput(&device)?;
@@ -131,6 +143,7 @@ impl ScreenCapture {
                 cache: None,
                 width,
                 height,
+                origin: (m.x, m.y),
             })
         }
     }
@@ -206,14 +219,30 @@ impl ScreenCapture {
             }
         }
 
-        let frame = if let Some(gpu) = &self.gpu {
-            self.context.CopySubresourceRegion(&gpu.mip_tex, 0, 0, 0, 0, &texture, 0, None);
-            self.context.GenerateMips(&gpu.srv);
-            self.context.CopySubresourceRegion(&gpu.staging_small, 0, 0, 0, 0, &gpu.mip_tex, gpu.level, None);
-            if gpu.hdr {
-                read_back_hdr(&self.context, &gpu.staging_small, gpu.small_w, gpu.small_h, self.sdr_white_scale)?
+        let frame = if let Some(gpu) = self.gpu.as_mut() {
+            let ctx = &self.context;
+            ctx.CopySubresourceRegion(&gpu.mip_tex, 0, 0, 0, 0, &texture, 0, None);
+            ctx.GenerateMips(&gpu.srv);
+            // Queue this frame's readback ...
+            let submitted = gpu.write_idx;
+            ctx.CopySubresourceRegion(&gpu.staging[submitted], 0, 0, 0, 0, &gpu.mip_tex, gpu.level, None);
+            gpu.write_idx ^= 1;
+            // ... and read the PREVIOUS frame's copy without waiting for the GPU. The very first
+            // frame has no previous one, so it waits once.
+            let (read_idx, wait) = if gpu.pending { (submitted ^ 1, false) } else { (submitted, true) };
+            gpu.pending = true;
+            let got = if gpu.hdr {
+                read_back_hdr(ctx, &gpu.staging[read_idx], gpu.small_w, gpu.small_h, self.sdr_white_scale, wait)?
             } else {
-                read_back(&self.context, &gpu.staging_small, gpu.small_w, gpu.small_h)?
+                read_back(ctx, &gpu.staging[read_idx], gpu.small_w, gpu.small_h, wait)?
+            };
+            match got {
+                Some(f) => f,
+                // GPU still busy (a game has it): reuse the last frame instead of stalling.
+                None => match &self.cache {
+                    Some(c) => return Ok(c.clone()),
+                    None => return Err(CaptureError::Other("first readback not ready".into())),
+                },
             }
         } else {
             if hdr {
@@ -229,11 +258,28 @@ impl ScreenCapture {
             }
             let staging = self.full_staging.as_ref().unwrap();
             self.context.CopyResource(staging, &texture);
-            read_back(&self.context, staging, self.width, self.height)?
+            read_back(&self.context, staging, self.width, self.height, true)?
+                .ok_or_else(|| CaptureError::Other("readback not ready".into()))?
         };
 
         self.cache = Some(frame.clone());
         Ok(frame)
+    }
+}
+
+/// Map a staging texture for reading. With `wait == false`, `Ok(None)` means the GPU has not
+/// finished with it yet (the caller reuses the previous frame).
+unsafe fn map_read(
+    context: &ID3D11DeviceContext,
+    staging: &ID3D11Texture2D,
+    wait: bool,
+) -> Result<Option<D3D11_MAPPED_SUBRESOURCE>, CaptureError> {
+    let flags = if wait { 0 } else { D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32 };
+    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    match context.Map(staging, 0, D3D11_MAP_READ, flags, Some(&mut mapped)) {
+        Ok(()) => Ok(Some(mapped)),
+        Err(e) if e.code() == DXGI_ERROR_WAS_STILL_DRAWING => Ok(None),
+        Err(e) => Err(CaptureError::Other(format!("Map failed: {e}"))),
     }
 }
 
@@ -242,16 +288,16 @@ unsafe fn read_back(
     staging: &ID3D11Texture2D,
     width: u32,
     height: u32,
-) -> Result<Frame, CaptureError> {
-    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-    context
-        .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-        .map_err(|e| CaptureError::Other(format!("Map failed: {e}")))?;
+    wait: bool,
+) -> Result<Option<Frame>, CaptureError> {
+    let Some(mapped) = map_read(context, staging, wait)? else {
+        return Ok(None);
+    };
     let pitch = mapped.RowPitch;
     let size = (pitch as usize) * (height as usize);
     let data = std::slice::from_raw_parts(mapped.pData as *const u8, size).to_vec();
     context.Unmap(staging, 0);
-    Ok(Frame { data, pitch, width, height })
+    Ok(Some(Frame { data, pitch, width, height }))
 }
 
 /// IEEE half -> f32.
@@ -284,11 +330,11 @@ unsafe fn read_back_hdr(
     width: u32,
     height: u32,
     white_scale: f32,
-) -> Result<Frame, CaptureError> {
-    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-    context
-        .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-        .map_err(|e| CaptureError::Other(format!("Map failed: {e}")))?;
+    wait: bool,
+) -> Result<Option<Frame>, CaptureError> {
+    let Some(mapped) = map_read(context, staging, wait)? else {
+        return Ok(None);
+    };
     let src_pitch = mapped.RowPitch as usize;
     let src = std::slice::from_raw_parts(mapped.pData as *const u8, src_pitch * height as usize);
     let out_pitch = width as usize * 4;
@@ -304,7 +350,7 @@ unsafe fn read_back_hdr(
         }
     }
     context.Unmap(staging, 0);
-    Ok(Frame { data, pitch: out_pitch as u32, width, height })
+    Ok(Some(Frame { data, pitch: out_pitch as u32, width, height }))
 }
 
 unsafe fn create_gpu_downscale(
@@ -351,9 +397,12 @@ unsafe fn create_gpu_downscale(
     device.CreateShaderResourceView(&mip_tex, Some(&srv_desc), Some(&mut srv))?;
     let srv = srv.ok_or("SRV creation failed")?;
 
-    let staging_small = create_staging(device, small_w, small_h, stage_fmt)?;
+    let staging = [
+        create_staging(device, small_w, small_h, stage_fmt)?,
+        create_staging(device, small_w, small_h, stage_fmt)?,
+    ];
 
-    Ok(GpuDownscale { mip_tex, srv, level, small_w, small_h, staging_small, hdr })
+    Ok(GpuDownscale { mip_tex, srv, level, small_w, small_h, staging, write_idx: 0, pending: false, hdr })
 }
 
 unsafe fn create_staging(

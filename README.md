@@ -75,6 +75,13 @@ Designed to be gentle on the laptop and the strip:
   you toggle "Start with Windows".
 - **CPU/GPU:** frames are shrunk on the GPU that already drives your monitor; typical load is a few
   percent of one core while the picture is moving, and almost nothing on a still screen.
+- **Games:** the app runs at below-normal CPU priority and the lowest GPU scheduling priority, reads
+  frames back without ever waiting for a busy GPU, drops to 30 fps (`capture.game_fps`) while a real
+  full-screen app is focused (detected with Windows' own full-screen detector, so merely maximized
+  windows do not count), and never restarts or retries aggressively while a game owns the screen.
+  Measured on an RTX 4060 laptop with a synthetic load keeping the GPU 100% busy while the screen
+  changed at 60 Hz: about 1.4% less GPU throughput at 60 fps capture (roughly half that at 30 fps) and
+  about 4% of one CPU core. A game that is not completely GPU-bound sees no difference.
 - **No admin rights, no network, no drivers.**
 
 ## Security stance
