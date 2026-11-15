@@ -3,6 +3,7 @@
 
 mod audio;
 mod capture;
+mod single;
 mod color;
 mod config;
 mod device;
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -51,6 +52,18 @@ fn main() {
         gui::run_settings_window();
         return;
     }
+
+    // One tray app per session. Starting it again (taskbar, shortcut, autostart) just shows
+    // the settings window of the running one. After a self-restart the old process may still
+    // be shutting down, so wait for it.
+    let wait = if restart_count_from_args() > 0 { Duration::from_secs(10) } else { Duration::ZERO };
+    let _instance = match single::acquire_with_retry("Local\\SYNCFASTERGB_App", wait) {
+        Some(g) => g,
+        None => {
+            gui::open_settings();
+            return;
+        }
+    };
 
     log::info!("SYNCFASTERGB starting");
 
@@ -155,10 +168,11 @@ fn capture_loop(
     // with the freshest config until it appears or the app quits.
     let mut capture_cfg = config.capture.clone();
     let mut waiting_logged = false;
-    let mut capturer = loop {
+    let first = loop {
         if !running.load(Ordering::Relaxed) {
             return;
         }
+        capture::dxgi::attach_input_desktop();
         match ScreenCapture::new(&capture_cfg) {
             Ok(c) => break c,
             Err(e) => {
@@ -179,7 +193,8 @@ fn capture_loop(
 
     let mut extractor = ColorExtractor::new(config.device.lamps_amount, &config.sync);
 
-    log::info!("캡처 스레드 시작 ({}fps, {}x{})", config.capture.fps, capturer.width, capturer.height);
+    log::info!("capture thread started ({} fps, {}x{})", config.capture.fps, first.width, first.height);
+    let mut capturer: Option<ScreenCapture> = Some(first);
     let mut local_version = 0u32;
     // 검정 화면 연속 프레임 카운터 (1초 이상 검정이면 플래그 설정)
     let mut black_frame_count = 0u32;
@@ -199,6 +214,15 @@ fn capture_loop(
     // (2026-10-14 로그: 5시간 동안 19,355회 반복돼 7.5MB)
     let mut access_lost_since: Option<Instant> = None;
     let mut access_lost_reinits = 0u32;
+    // recovery bookkeeping
+    let mut frames_since_create = 1u32; // the first capturer already exists
+    let mut rapid_losses = 0u32;
+    let mut create_failures = 0u32;
+    let mut secure_desktop_logged = false;
+    let mut dead_since: Option<Instant> = None; // capture unavailable for a reason other than the secure desktop
+    let restarts = restart_count_from_args();
+    const WATCHDOG: Duration = Duration::from_secs(45);
+    const MAX_RESTARTS: u32 = 3;
 
     while running.load(Ordering::Relaxed) {
         let frame_start = Instant::now();
@@ -214,10 +238,8 @@ fn capture_loop(
             if c.capture != capture_cfg {
                 // monitor / GPU path / HDR level changed in the settings window
                 capture_cfg = c.capture.clone();
-                match capturer.reinitialize(&capture_cfg) {
-                    Ok(()) => log::info!("capture settings applied"),
-                    Err(e) => log::warn!("capture settings not applied yet ({}); will keep retrying", e),
-                }
+                log::info!("capture settings changed: recreating capture");
+                capturer = None; // recreated below with the new settings
             }
         }
 
@@ -226,8 +248,49 @@ fn capture_loop(
             continue;
         }
 
+        // (Re)create the capturer when there is none. Everything old has been dropped first.
+        if capturer.is_none() {
+            if !capture::dxgi::attach_input_desktop() {
+                if !secure_desktop_logged {
+                    log::info!("secure desktop active (UAC prompt or lock screen): capture paused");
+                    secure_desktop_logged = true;
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                continue;
+            }
+            if secure_desktop_logged {
+                log::info!("secure desktop closed: resuming capture");
+                secure_desktop_logged = false;
+            }
+            match ScreenCapture::new(&capture_cfg) {
+                Ok(c) => {
+                    log::info!("capture re-created ({}x{})", c.width, c.height);
+                    capturer = Some(c);
+                    frames_since_create = 0;
+                    create_failures = 0;
+                }
+                Err(e) => {
+                    create_failures += 1;
+                    dead_since.get_or_insert_with(Instant::now);
+                    if create_failures == 1 || create_failures.is_multiple_of(60) {
+                        log::warn!("cannot re-create capture yet ({}); retrying (attempt {})", e, create_failures);
+                    }
+                    if dead_since.is_some_and(|t| t.elapsed() >= WATCHDOG) && restarts < MAX_RESTARTS {
+                        log::error!("capture dead for {} s: restarting the app", WATCHDOG.as_secs());
+                        if relaunch_self(restarts) {
+                            running.store(false, Ordering::SeqCst);
+                            return;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(lost_backoff_ms(create_failures.min(3))));
+                    continue;
+                }
+            }
+        }
+        let Some(cap) = capturer.as_mut() else { continue };
+
         let t_cap = Instant::now();
-        let cap_result = capturer.capture_frame(frame_interval.as_millis().max(1) as u32);
+        let cap_result = cap.capture_frame(frame_interval.as_millis().max(1) as u32);
         if cap_result.is_ok() {
             stat_cap += t_cap.elapsed();
             stat_frames += 1;
@@ -235,8 +298,11 @@ fn capture_loop(
         match cap_result {
             Ok(frame) => {
                 consecutive_errors = 0;
+                frames_since_create = frames_since_create.saturating_add(1);
+                rapid_losses = 0;
+                dead_since = None;
                 if let Some(since) = access_lost_since.take() {
-                    log::info!("Desktop Duplication 접근 복구 ({}초, 재초기화 {}회)",
+                    log::info!("screen capture recovered after {} s ({} re-creations)",
                         since.elapsed().as_secs(), access_lost_reinits);
                     access_lost_reinits = 0;
                 }
@@ -278,8 +344,9 @@ fn capture_loop(
                 let _ = tx.try_send(colors);
             }
             Err(CaptureError::Timeout) => {
+                dead_since = None; // a timeout just means the screen is static
                 // Static screen: keep smoothing converging, and send a keepalive.
-                if let Some(f) = capturer.last_frame() {
+                if let Some(f) = cap.last_frame() {
                     let colors = extractor.extract(&f.data, f.pitch, f.width, f.height);
                     if last_sent.as_ref() != Some(&colors) || last_send_at.elapsed() >= KEEPALIVE {
                         last_sent = Some(colors.clone());
@@ -290,26 +357,41 @@ fn capture_loop(
             }
             Err(CaptureError::AccessLost) => {
                 if access_lost_since.is_none() {
-                    log::warn!("Desktop Duplication 접근 손실 — 복구될 때까지 1초 간격 재초기화");
+                    log::warn!("screen capture access lost: re-creating it");
                     access_lost_since = Some(Instant::now());
                 }
-                std::thread::sleep(Duration::from_secs(1));
+                dead_since.get_or_insert_with(Instant::now);
                 access_lost_reinits += 1;
-                if let Err(e) = capturer.reinitialize(&capture_cfg) {
-                    if access_lost_reinits == 1 || access_lost_reinits.is_multiple_of(300) {
-                        log::error!("재초기화 실패 ({}회): {}", access_lost_reinits, e);
+                if frames_since_create == 0 {
+                    rapid_losses += 1;
+                    if rapid_losses == 1 || rapid_losses.is_multiple_of(30) {
+                        log::warn!("capture lost again right after re-creation ({} times)", rapid_losses);
+                    }
+                } else {
+                    rapid_losses = 0;
+                }
+                // Drop every GPU object BEFORE building new ones.
+                capturer = None;
+                std::thread::sleep(Duration::from_millis(lost_backoff_ms(rapid_losses)));
+                if dead_since.is_some_and(|t| t.elapsed() >= WATCHDOG) && restarts < MAX_RESTARTS
+                    && capture::dxgi::attach_input_desktop()
+                {
+                    log::error!("capture dead for {} s: restarting the app", WATCHDOG.as_secs());
+                    if relaunch_self(restarts) {
+                        running.store(false, Ordering::SeqCst);
+                        return;
                     }
                 }
             }
             Err(e) => {
                 consecutive_errors += 1;
-                log::error!("캡처 오류: {}", e);
+                if consecutive_errors == 1 || consecutive_errors.is_multiple_of(30) {
+                    log::error!("capture error: {} ({} in a row)", e, consecutive_errors);
+                }
                 if consecutive_errors >= 30 {
-                    log::warn!("연속 오류 {}회 — DXGI 재초기화 시도", consecutive_errors);
+                    log::warn!("{} capture errors in a row: re-creating capture", consecutive_errors);
                     consecutive_errors = 0;
-                    if let Err(e) = capturer.reinitialize(&capture_cfg) {
-                        log::error!("재초기화 실패: {}", e);
-                    }
+                    capturer = None;
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -334,6 +416,55 @@ fn capture_loop(
         if elapsed < frame_interval {
             std::thread::sleep(frame_interval - elapsed);
         }
+    }
+}
+
+/// How long to wait after the screen capture was lost. Normal losses (fullscreen app, mode
+/// change) retry quickly; if capture is lost again right after being recreated, back off up
+/// to 5 s so a stuck state never spins.
+fn lost_backoff_ms(rapid_losses: u32) -> u64 {
+    if rapid_losses == 0 {
+        500
+    } else {
+        (rapid_losses.min(5) as u64) * 1000
+    }
+}
+
+/// Start a fresh copy of this program (same arguments, bumped restart counter). Last-resort
+/// recovery when screen capture stays dead; capped so a persistent problem cannot loop.
+fn relaunch_self(restarts: u32) -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with("--restart-count="))
+        .collect();
+    std::process::Command::new(exe)
+        .args(args)
+        .arg(format!("--restart-count={}", restarts + 1))
+        .spawn()
+        .is_ok()
+}
+
+fn restart_count_from_args() -> u32 {
+    std::env::args()
+        .find_map(|a| a.strip_prefix("--restart-count=").and_then(|v| v.parse().ok()))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::lost_backoff_ms;
+
+    #[test]
+    fn backoff_grows_then_caps() {
+        assert_eq!(lost_backoff_ms(0), 500);
+        assert_eq!(lost_backoff_ms(1), 1000);
+        assert_eq!(lost_backoff_ms(3), 3000);
+        assert_eq!(lost_backoff_ms(5), 5000);
+        assert_eq!(lost_backoff_ms(500), 5000);
     }
 }
 
@@ -971,6 +1102,7 @@ impl ApplicationHandler for TrayApp {
         let tray = TrayIconBuilder::new()
             .with_icon(create_rgb_tray_icon())
             .with_tooltip("SYNCFASTERGB: searching for strip")
+            .with_menu_on_left_click(false)
             .with_menu(Box::new(menu))
             .build()
             .expect("트레이 아이콘 생성 실패");
@@ -985,6 +1117,10 @@ impl ApplicationHandler for TrayApp {
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.running.load(Ordering::Relaxed) {
+            event_loop.exit();
+            return;
+        }
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             if let Some(ref toggle) = self.toggle_item {
                 if event.id() == toggle.id() {
@@ -1010,6 +1146,15 @@ impl ApplicationHandler for TrayApp {
                     self.running.store(false, Ordering::Relaxed);
                     event_loop.exit();
                 }
+            }
+        }
+
+        // Left click / double click on the tray icon opens (or focuses) the settings window.
+        while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
+            match ev {
+                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }
+                | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => gui::open_settings(),
+                _ => {}
             }
         }
 

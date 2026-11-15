@@ -6,6 +6,24 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 
+/// Attach the calling thread to the current input desktop. Returns `false` while the secure
+/// desktop (UAC prompt, lock screen) is showing: nothing can be captured then, and that is
+/// not an error. Desktop Duplication only works from the desktop that currently has input.
+pub fn attach_input_desktop() -> bool {
+    use windows::Win32::System::StationsAndDesktops::{
+        OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
+    };
+    const GENERIC_ALL: u32 = 0x1000_0000;
+    unsafe {
+        match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_ACCESS_FLAGS(GENERIC_ALL)) {
+            // The handle must stay open while the thread uses the desktop; it is a few
+            // bytes and only re-opened after a desktop switch.
+            Ok(h) => SetThreadDesktop(h).is_ok(),
+            Err(_) => false,
+        }
+    }
+}
+
 /// Target width of the downscaled frame used for color extraction.
 const SMALL_TARGET_WIDTH: u32 = 192;
 
@@ -216,12 +234,6 @@ impl ScreenCapture {
 
         self.cache = Some(frame.clone());
         Ok(frame)
-    }
-
-    /// Re-create everything (AccessLost, resolution change, adapter change).
-    pub fn reinitialize(&mut self, cfg: &CaptureConfig) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Self::new(cfg)?;
-        Ok(())
     }
 }
 

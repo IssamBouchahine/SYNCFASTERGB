@@ -256,8 +256,14 @@ pub fn detect_locale() -> &'static Locale {
     resolve_locale(&config.app.language)
 }
 
-/// 설정 GUI를 별도 프로세스로 실행
+/// Window title of the settings window (unique, so it can be found again).
+pub const SETTINGS_TITLE: &str = "SYNCFASTERGB Settings";
+
+/// Open the settings window, or bring the existing one to the front (never a second copy).
 pub fn open_settings() {
+    if crate::single::focus_window(SETTINGS_TITLE) {
+        return;
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Err(e) = std::process::Command::new(exe).arg("--settings").spawn() {
             log::error!("Failed to open settings GUI: {}", e);
@@ -331,6 +337,11 @@ fn icon_hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
 
 /// --settings 모드 진입점
 pub fn run_settings_window() {
+    // One settings window per session: a second launch just focuses the first.
+    let Some(_settings_guard) = crate::single::acquire("Local\\SYNCFASTERGB_Settings") else {
+        crate::single::focus_window(SETTINGS_TITLE);
+        return;
+    };
     let locale = detect_locale();
     let config_path = Config::config_path();
     let config = Config::load(&config_path).unwrap_or_default();
@@ -349,7 +360,7 @@ pub fn run_settings_window() {
     };
 
     if let Err(e) = eframe::run_native(
-        "SYNCFASTERGB",
+        SETTINGS_TITLE,
         options,
         Box::new(|cc| {
             setup_fonts(&cc.egui_ctx);
