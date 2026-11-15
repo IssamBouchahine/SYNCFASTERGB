@@ -2,11 +2,8 @@
 //! Reads the system output level (0.0 to 1.0) through IAudioMeterInformation
 //! Noise gate (at most 0.01 becomes 0), raw value, no smoothing
 
-use windows::Win32::Media::Audio::{
-    eRender, eConsole,
-    IMMDeviceEnumerator, MMDeviceEnumerator,
-};
 use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
+use windows::Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
@@ -33,9 +30,7 @@ impl AudioMeter {
     /// Peak level to an integer 0-100
     /// Noise gate: at most 0.01 gives 0, otherwise raw * 100
     pub fn peak_volume(&mut self) -> u8 {
-        let raw = unsafe {
-            self.meter.GetPeakValue().unwrap_or(0.0)
-        };
+        let raw = unsafe { self.meter.GetPeakValue().unwrap_or(0.0) };
 
         let level = if raw <= 0.01 { 0.0 } else { raw };
 

@@ -27,7 +27,11 @@ pub struct MonitorInfo {
 impl MonitorInfo {
     /// Text matched by `capture.monitor_name`.
     pub fn match_text(&self) -> String {
-        format!("{} {} {}", self.adapter_name, self.device_name, self.monitor_id).to_lowercase()
+        format!(
+            "{} {} {}",
+            self.adapter_name, self.device_name, self.monitor_id
+        )
+        .to_lowercase()
     }
 }
 
@@ -36,7 +40,9 @@ impl MonitorInfo {
 pub fn select<'a>(monitors: &'a [MonitorInfo], index: u32, name: &str) -> Option<&'a MonitorInfo> {
     let name = name.trim().to_lowercase();
     if !name.is_empty() {
-        return monitors.iter().find(|m| m.attached && m.match_text().contains(&name));
+        return monitors
+            .iter()
+            .find(|m| m.attached && m.match_text().contains(&name));
     }
     monitors.iter().find(|m| m.global_index == index)
 }
@@ -44,7 +50,10 @@ pub fn select<'a>(monitors: &'a [MonitorInfo], index: u32, name: &str) -> Option
 /// Hardware id of the monitor attached to a GDI device name (`MONITOR\\<ID>\\{...}`).
 fn monitor_hw_id(device_name: &[u16; 32]) -> String {
     unsafe {
-        let mut dd = DISPLAY_DEVICEW { cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+        let mut dd = DISPLAY_DEVICEW {
+            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+            ..Default::default()
+        };
         if EnumDisplayDevicesW(PCWSTR(device_name.as_ptr()), 0, &mut dd, 0).as_bool() {
             return parse_hw_id(&wide_to_string(&dd.DeviceID));
         }
@@ -148,14 +157,22 @@ mod tests {
     fn sample() -> Vec<MonitorInfo> {
         vec![
             mon(0, "Intel(R) UHD Graphics", r"\\.\DISPLAY1", true),
-            mon(1, "NVIDIA GeForce RTX 4060 Laptop GPU", r"\\.\DISPLAY2", true),
+            mon(
+                1,
+                "NVIDIA GeForce RTX 4060 Laptop GPU",
+                r"\\.\DISPLAY2",
+                true,
+            ),
         ]
     }
 
     #[test]
     fn selects_by_global_index() {
         let s = sample();
-        assert_eq!(select(&s, 1, "").unwrap().adapter_name, "NVIDIA GeForce RTX 4060 Laptop GPU");
+        assert_eq!(
+            select(&s, 1, "").unwrap().adapter_name,
+            "NVIDIA GeForce RTX 4060 Laptop GPU"
+        );
         assert!(select(&s, 5, "").is_none());
     }
 
@@ -176,7 +193,10 @@ mod tests {
 
     #[test]
     fn hardware_id_parsing() {
-        assert_eq!(parse_hw_id(r"MONITOR\AOC3201\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001"), "AOC3201");
+        assert_eq!(
+            parse_hw_id(r"MONITOR\AOC3201\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001"),
+            "AOC3201"
+        );
         assert_eq!(parse_hw_id(r"PCI\VEN_10DE"), "");
         assert_eq!(parse_hw_id(""), "");
     }

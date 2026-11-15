@@ -2,8 +2,8 @@ use eframe::egui;
 
 use crate::capture::monitors::{self, MonitorInfo};
 use crate::color::extractor::{self, EdgeParams, Geometry};
-use crate::ipc::{FrameView, LedView};
 use crate::config::{self, Config, LedMode, RhythmSource, SoftEffect};
+use crate::ipc::{FrameView, LedView};
 use eframe::egui::Color32;
 
 const WIRE_MAPS: &[&str] = &["RGB", "RBG", "GRB", "GBR", "BRG", "BGR"];
@@ -125,12 +125,22 @@ static KO: Locale = Locale {
     autostart: "Windows 시작 시 자동 실행",
     autostart_failed_prefix: "자동 시작 실패: ",
     dynamic_effects: &[
-        "무지개 흐름", "숨쉬기", "컬러 체이스",
-        "유성", "반짝이", "그라데이션", "마키",
+        "무지개 흐름",
+        "숨쉬기",
+        "컬러 체이스",
+        "유성",
+        "반짝이",
+        "그라데이션",
+        "마키",
     ],
     sound_effects: &[
-        "리듬 웨이브", "리듬 펄스", "리듬 스펙트럼",
-        "리듬 플래시", "리듬 그라데이션", "리듬 체이스", "리듬 레인보우",
+        "리듬 웨이브",
+        "리듬 펄스",
+        "리듬 스펙트럼",
+        "리듬 플래시",
+        "리듬 그라데이션",
+        "리듬 체이스",
+        "리듬 레인보우",
     ],
     color_presets: &[
         ("빨강", [255, 0, 0]),
@@ -206,12 +216,22 @@ static EN: Locale = Locale {
     autostart: "Start with Windows",
     autostart_failed_prefix: "Autostart failed: ",
     dynamic_effects: &[
-        "Rainbow Flow", "Breathing", "Color Chase",
-        "Meteor", "Sparkle", "Gradient", "Marquee",
+        "Rainbow Flow",
+        "Breathing",
+        "Color Chase",
+        "Meteor",
+        "Sparkle",
+        "Gradient",
+        "Marquee",
     ],
     sound_effects: &[
-        "Rhythm Wave", "Rhythm Pulse", "Rhythm Spectrum",
-        "Rhythm Flash", "Rhythm Gradient", "Rhythm Chase", "Rhythm Rainbow",
+        "Rhythm Wave",
+        "Rhythm Pulse",
+        "Rhythm Spectrum",
+        "Rhythm Flash",
+        "Rhythm Gradient",
+        "Rhythm Chase",
+        "Rhythm Rainbow",
     ],
     color_presets: &[
         ("Red", [255, 0, 0]),
@@ -244,7 +264,11 @@ pub fn resolve_locale(lang: &crate::config::Language) -> &'static Locale {
         Language::Auto => {
             use windows::Win32::Globalization::GetUserDefaultUILanguage;
             let lang_id = unsafe { GetUserDefaultUILanguage() };
-            if lang_id & 0x3FF == 0x12 { &KO } else { &EN }
+            if lang_id & 0x3FF == 0x12 {
+                &KO
+            } else {
+                &EN
+            }
         }
     }
 }
@@ -345,7 +369,11 @@ pub fn run_settings_window() {
     let app = SettingsGui::new(config, locale);
 
     let icon_data = generate_rgb_icon(32);
-    let icon = egui::IconData { rgba: icon_data, width: 32, height: 32 };
+    let icon = egui::IconData {
+        rgba: icon_data,
+        width: 32,
+        height: 32,
+    };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -372,8 +400,14 @@ pub fn run_settings_window() {
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     if let Ok(data) = std::fs::read("C:\\Windows\\Fonts\\malgun.ttf") {
-        fonts.font_data.insert("malgun".into(), egui::FontData::from_owned(data).into());
-        fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap().insert(0, "malgun".into());
+        fonts
+            .font_data
+            .insert("malgun".into(), egui::FontData::from_owned(data).into());
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Proportional)
+            .unwrap()
+            .insert(0, "malgun".into());
     }
     ctx.set_fonts(fonts);
 }
@@ -410,7 +444,11 @@ fn setup_style(ctx: &egui::Context) {
     v.selection.stroke = egui::Stroke::new(1.0_f32, theme::ACCENT);
     v.widgets.noninteractive.bg_fill = theme::CARD;
     v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
-    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active] {
+    for w in [
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+    ] {
         w.rounding = egui::Rounding::same(9.0);
     }
     v.widgets.inactive.bg_fill = theme::CARD_HI;
@@ -539,7 +577,13 @@ fn demo_frame() -> FrameData {
             bgra[o + 2] = r;
         }
     }
-    FrameData { w, h, bars: (8, 8, 0, 0), depth_pct: 15, bgra }
+    FrameData {
+        w,
+        h,
+        bars: (8, 8, 0, 0),
+        depth_pct: 15,
+        bgra,
+    }
 }
 
 /// New detection depth (percent) when a strip's inner edge is dragged to the pointer at
@@ -552,7 +596,11 @@ fn drag_depth_pct(edge: u8, fx: f32, fy: f32, g: &Geometry, fw: usize, fh: usize
         2 => (fx - g.l as f32) / fw,
         _ => ((fw - g.r as f32) - fx) / fw,
     } * 100.0;
-    if pct.is_nan() { 12 } else { pct.round().clamp(3.0, 40.0) as u8 }
+    if pct.is_nan() {
+        12
+    } else {
+        pct.round().clamp(3.0, 40.0) as u8
+    }
 }
 
 /// Is the strip's LED interface visible on the USB bus right now? (cheap, no device is opened)
@@ -562,9 +610,11 @@ fn strip_present() -> bool {
     hidapi::HidApi::new_without_enumerate()
         .and_then(|mut api| {
             api.add_devices(VENDOR_ID, PRODUCT_ID)?;
-            Ok(api
-                .device_list()
-                .any(|d| d.vendor_id() == VENDOR_ID && d.product_id() == PRODUCT_ID && d.interface_number() == 0))
+            Ok(api.device_list().any(|d| {
+                d.vendor_id() == VENDOR_ID
+                    && d.product_id() == PRODUCT_ID
+                    && d.interface_number() == 0
+            }))
         })
         .unwrap_or(false)
 }
@@ -630,7 +680,11 @@ impl SettingsGui {
         }
         if self.demo_tex.is_none() {
             let d = &self.demo;
-            self.demo_tex = Some(ctx.load_texture("detect_demo", bgra_to_image(d.w, d.h, &d.bgra), egui::TextureOptions::LINEAR));
+            self.demo_tex = Some(ctx.load_texture(
+                "detect_demo",
+                bgra_to_image(d.w, d.h, &d.bgra),
+                egui::TextureOptions::LINEAR,
+            ));
         }
         if self.frame_view.is_none() && now - self.last_frame_try > 1.0 {
             self.last_frame_try = now;
@@ -643,15 +697,31 @@ impl SettingsGui {
                     let img = bgra_to_image(snap.w, snap.h, &snap.bgra);
                     match self.frame_tex.as_mut() {
                         Some(t) => t.set(img, egui::TextureOptions::LINEAR),
-                        None => self.frame_tex = Some(ctx.load_texture("detect_live", img, egui::TextureOptions::LINEAR)),
+                        None => {
+                            self.frame_tex = Some(ctx.load_texture(
+                                "detect_live",
+                                img,
+                                egui::TextureOptions::LINEAR,
+                            ))
+                        }
                     }
-                    self.frame = Some(FrameData { w: snap.w, h: snap.h, bars: snap.bars, depth_pct: snap.depth_pct, bgra: snap.bgra });
+                    self.frame = Some(FrameData {
+                        w: snap.w,
+                        h: snap.h,
+                        bars: snap.bars,
+                        depth_pct: snap.depth_pct,
+                        bgra: snap.bgra,
+                    });
                     self.frame_at = now;
                 }
             }
         }
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
-        ctx.request_repaint_after(std::time::Duration::from_millis(if minimized { 500 } else { 33 }));
+        ctx.request_repaint_after(std::time::Duration::from_millis(if minimized {
+            500
+        } else {
+            33
+        }));
     }
 
     /// Mark settings as changed; the write is debounced in `flush`.
@@ -668,7 +738,11 @@ impl SettingsGui {
             ctx.request_repaint_after(std::time::Duration::from_millis(60));
             return;
         }
-        self.config.effect.mode = if self.led_on { self.tab.to_mode() } else { LedMode::Off };
+        self.config.effect.mode = if self.led_on {
+            self.tab.to_mode()
+        } else {
+            LedMode::Off
+        };
         self.config.sanitize();
         match self.config.save() {
             Ok(()) => self.status_msg = self.locale.applied.into(),
@@ -691,84 +765,124 @@ impl eframe::App for SettingsGui {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(20.0, 16.0)))
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    self.draw_header(ui);
-                    ui.add_space(14.0);
-                    self.draw_hero_card(ui);
-                    ui.add_space(14.0);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.draw_header(ui);
+                        ui.add_space(14.0);
+                        self.draw_hero_card(ui);
+                        ui.add_space(14.0);
 
-                    // ── Mode selector ──
-                    let labels = [locale.tab_sync, locale.tab_dynamic, locale.tab_sound, locale.tab_static];
-                    let current = match self.tab {
-                        Tab::Sync => 0,
-                        Tab::Dynamic => 1,
-                        Tab::Sound => 2,
-                        Tab::Static => 3,
-                    };
-                    let selected = if self.led_on { Some(current) } else { None };
-                    if let Some(i) = segmented(ui, &labels, selected) {
-                        self.tab = [Tab::Sync, Tab::Dynamic, Tab::Sound, Tab::Static][i];
-                        self.led_on = true;
-                        self.save_and_apply(0.0);
-                    }
-                    ui.add_space(14.0);
+                        // ── Mode selector ──
+                        let labels = [
+                            locale.tab_sync,
+                            locale.tab_dynamic,
+                            locale.tab_sound,
+                            locale.tab_static,
+                        ];
+                        let current = match self.tab {
+                            Tab::Sync => 0,
+                            Tab::Dynamic => 1,
+                            Tab::Sound => 2,
+                            Tab::Static => 3,
+                        };
+                        let selected = if self.led_on { Some(current) } else { None };
+                        if let Some(i) = segmented(ui, &labels, selected) {
+                            self.tab = [Tab::Sync, Tab::Dynamic, Tab::Sound, Tab::Static][i];
+                            self.led_on = true;
+                            self.save_and_apply(0.0);
+                        }
+                        ui.add_space(14.0);
 
-                    if !self.led_on {
-                        card(ui, |ui| {
-                            ui.vertical_centered(|ui| {
-                                ui.add_space(18.0);
-                                ui.label(egui::RichText::new(locale.led_off_msg).size(20.0).color(theme::MUTED));
-                                ui.add_space(6.0);
-                                ui.label(egui::RichText::new(locale.led_off_hint).color(theme::MUTED));
-                                ui.add_space(18.0);
+                        if !self.led_on {
+                            card(ui, |ui| {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(18.0);
+                                    ui.label(
+                                        egui::RichText::new(locale.led_off_msg)
+                                            .size(20.0)
+                                            .color(theme::MUTED),
+                                    );
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        egui::RichText::new(locale.led_off_hint)
+                                            .color(theme::MUTED),
+                                    );
+                                    ui.add_space(18.0);
+                                });
                             });
-                        });
-                    } else {
-                        match self.tab {
-                            Tab::Sync => self.draw_sync_tab(ui),
-                            Tab::Dynamic => self.draw_dynamic_tab(ui),
-                            Tab::Sound => self.draw_sound_tab(ui),
-                            Tab::Static => self.draw_static_tab(ui),
+                        } else {
+                            match self.tab {
+                                Tab::Sync => self.draw_sync_tab(ui),
+                                Tab::Dynamic => self.draw_dynamic_tab(ui),
+                                Tab::Sound => self.draw_sound_tab(ui),
+                                Tab::Static => self.draw_static_tab(ui),
+                            }
                         }
-                    }
 
-                    ui.add_space(6.0);
-                    let toggled = ui
-                        .horizontal(|ui| {
-                            let (r, chev) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
-                            let c = r.center();
-                            let pts = if self.show_advanced {
-                                vec![egui::pos2(c.x - 4.5, c.y - 2.0), egui::pos2(c.x, c.y + 2.5), egui::pos2(c.x + 4.5, c.y - 2.0)]
-                            } else {
-                                vec![egui::pos2(c.x - 2.0, c.y - 4.5), egui::pos2(c.x + 2.5, c.y), egui::pos2(c.x - 2.0, c.y + 4.5)]
-                            };
-                            ui.painter().add(egui::Shape::line(pts, egui::Stroke::new(2.0_f32, theme::MUTED)));
-                            let label = ui.add(
-                                egui::Label::new(egui::RichText::new(locale.settings).size(14.0).color(theme::MUTED))
+                        ui.add_space(6.0);
+                        let toggled = ui
+                            .horizontal(|ui| {
+                                let (r, chev) = ui.allocate_exact_size(
+                                    egui::vec2(16.0, 16.0),
+                                    egui::Sense::click(),
+                                );
+                                let c = r.center();
+                                let pts = if self.show_advanced {
+                                    vec![
+                                        egui::pos2(c.x - 4.5, c.y - 2.0),
+                                        egui::pos2(c.x, c.y + 2.5),
+                                        egui::pos2(c.x + 4.5, c.y - 2.0),
+                                    ]
+                                } else {
+                                    vec![
+                                        egui::pos2(c.x - 2.0, c.y - 4.5),
+                                        egui::pos2(c.x + 2.5, c.y),
+                                        egui::pos2(c.x - 2.0, c.y + 4.5),
+                                    ]
+                                };
+                                ui.painter().add(egui::Shape::line(
+                                    pts,
+                                    egui::Stroke::new(2.0_f32, theme::MUTED),
+                                ));
+                                let label = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(locale.settings)
+                                            .size(14.0)
+                                            .color(theme::MUTED),
+                                    )
                                     .sense(egui::Sense::click()),
-                            );
-                            chev.clicked() || label.clicked()
-                        })
-                        .inner;
-                    if toggled {
-                        self.show_advanced = !self.show_advanced;
-                    }
-                    if self.show_advanced {
-                        ui.add_space(8.0);
-                        self.draw_settings_section(ui);
-                    }
-
-                    // ── Status message ──
-                    ui.add_space(10.0);
-                    if !self.status_msg.is_empty() {
-                        let elapsed = ctx.input(|i| i.time) - self.status_time;
-                        if elapsed < 2.5 {
-                            let color = if self.status_msg.contains(locale.failed_keyword) { theme::BAD } else { theme::GOOD };
-                            ui.label(egui::RichText::new(format!("● {}", self.status_msg)).size(12.0).color(color));
-                            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                                );
+                                chev.clicked() || label.clicked()
+                            })
+                            .inner;
+                        if toggled {
+                            self.show_advanced = !self.show_advanced;
                         }
-                    }
-                });
+                        if self.show_advanced {
+                            ui.add_space(8.0);
+                            self.draw_settings_section(ui);
+                        }
+
+                        // ── Status message ──
+                        ui.add_space(10.0);
+                        if !self.status_msg.is_empty() {
+                            let elapsed = ctx.input(|i| i.time) - self.status_time;
+                            if elapsed < 2.5 {
+                                let color = if self.status_msg.contains(locale.failed_keyword) {
+                                    theme::BAD
+                                } else {
+                                    theme::GOOD
+                                };
+                                ui.label(
+                                    egui::RichText::new(format!("● {}", self.status_msg))
+                                        .size(12.0)
+                                        .color(color),
+                                );
+                                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                            }
+                        }
+                    });
             });
 
         self.flush(ctx);
@@ -786,8 +900,10 @@ impl SettingsGui {
             let segments = 36;
             let (ro, ri) = (15.0f32, 8.5f32);
             for i in 0..segments {
-                let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-                let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU
+                    - std::f32::consts::FRAC_PI_2;
+                let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU
+                    - std::f32::consts::FRAC_PI_2;
                 let (r, g, b) = icon_hsl_to_rgb((i as f32 / segments as f32) * 360.0, 1.0, 0.55);
                 ui.painter().add(egui::Shape::convex_polygon(
                     vec![
@@ -803,15 +919,28 @@ impl SettingsGui {
 
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(egui::RichText::new("SYNCFASTERGB").strong().size(21.0).extra_letter_spacing(1.5));
-                ui.label(egui::RichText::new("Screen-sync ambient lighting").size(12.0).color(theme::MUTED));
+                ui.label(
+                    egui::RichText::new("SYNCFASTERGB")
+                        .strong()
+                        .size(21.0)
+                        .extra_letter_spacing(1.5),
+                );
+                ui.label(
+                    egui::RichText::new("Screen-sync ambient lighting")
+                        .size(12.0)
+                        .color(theme::MUTED),
+                );
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if toggle_switch(ui, &mut self.led_on).changed() {
                     self.save_and_apply(0.0);
                 }
-                let (txt, col) = if self.led_on { (self.locale.led_on, theme::GOOD) } else { (self.locale.led_off, theme::MUTED) };
+                let (txt, col) = if self.led_on {
+                    (self.locale.led_on, theme::GOOD)
+                } else {
+                    (self.locale.led_off, theme::MUTED)
+                };
                 ui.label(egui::RichText::new(txt).strong().size(13.0).color(col));
                 ui.add_space(6.0);
                 let (chip_text, chip_col) = if !self.engine_running {
@@ -833,8 +962,15 @@ impl SettingsGui {
     /// Live strip preview + the big brightness slider.
     fn draw_hero_card(&mut self, ui: &mut egui::Ui) {
         let now = ui.input(|i| i.time);
-        let live_fresh = self.tab == Tab::Sync && self.led_on && !self.live.is_empty() && now - self.last_live_at < 1.5;
-        let live = if live_fresh { Some(self.live.clone()) } else { None };
+        let live_fresh = self.tab == Tab::Sync
+            && self.led_on
+            && !self.live.is_empty()
+            && now - self.last_live_at < 1.5;
+        let live = if live_fresh {
+            Some(self.live.clone())
+        } else {
+            None
+        };
         let source = match (&live, self.led_on, self.tab) {
             (Some(l), _, _) => PreviewSource::Live(l),
             (None, false, _) => PreviewSource::Solid(theme::BORDER),
@@ -843,7 +979,9 @@ impl SettingsGui {
                 self.config.effect.color_g,
                 self.config.effect.color_b,
             )),
-            (None, true, Tab::Sync) => PreviewSource::Spectrum { reverse: self.config.sync.reverse },
+            (None, true, Tab::Sync) => PreviewSource::Spectrum {
+                reverse: self.config.sync.reverse,
+            },
             // built-in effects run inside the strip: we cannot know their colors, so show neutral dots
             (None, true, _) => PreviewSource::Solid(Color32::from_gray(70)),
         };
@@ -859,22 +997,49 @@ impl SettingsGui {
         };
 
         card(ui, |ui| {
-            let depth = if self.tab == Tab::Sync && self.led_on { Some(self.config.sync.edge_depth_pct) } else { None };
-            draw_layout_preview(ui, self.config.device.lamps_amount, self.config.sync.edge_number, depth, source);
+            let depth = if self.tab == Tab::Sync && self.led_on {
+                Some(self.config.sync.edge_depth_pct)
+            } else {
+                None
+            };
+            draw_layout_preview(
+                ui,
+                self.config.device.lamps_amount,
+                self.config.sync.edge_number,
+                depth,
+                source,
+            );
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new(caption).size(11.5).color(theme::MUTED));
             });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(self.locale.brightness.trim_end_matches(':')).strong().size(15.0));
+                ui.label(
+                    egui::RichText::new(self.locale.brightness.trim_end_matches(':'))
+                        .strong()
+                        .size(15.0),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let pct = (self.config.sync.brightness as f32 / 255.0 * 100.0).round() as u32;
-                    ui.label(egui::RichText::new(format!("{pct}%")).strong().size(26.0).color(theme::ACCENT));
+                    ui.label(
+                        egui::RichText::new(format!("{pct}%"))
+                            .strong()
+                            .size(26.0)
+                            .color(theme::ACCENT),
+                    );
                 });
             });
             ui.add_space(4.0);
             let mut pct = self.config.sync.brightness as f32 / 255.0 * 100.0;
-            if fat_slider(ui, &mut pct, 2.0, 100.0, theme::CARD_HI, theme::ACCENT, 30.0) {
+            if fat_slider(
+                ui,
+                &mut pct,
+                2.0,
+                100.0,
+                theme::CARD_HI,
+                theme::ACCENT,
+                30.0,
+            ) {
                 self.config.sync.brightness = (pct / 100.0 * 255.0).round().clamp(5.0, 255.0) as u8;
                 self.save_and_apply(0.0);
             }
@@ -910,7 +1075,8 @@ impl SettingsGui {
                             let is_sel = if cfg.monitor_name.is_empty() {
                                 cfg.monitor == m.global_index
                             } else {
-                                !m.monitor_id.is_empty() && cfg.monitor_name.eq_ignore_ascii_case(&m.monitor_id)
+                                !m.monitor_id.is_empty()
+                                    && cfg.monitor_name.eq_ignore_ascii_case(&m.monitor_id)
                             };
                             if ui.selectable_label(is_sel, text).clicked() && m.attached {
                                 self.config.capture.monitor = m.global_index;
@@ -943,7 +1109,11 @@ impl SettingsGui {
             });
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(locale.edges).color(theme::MUTED));
-                let sel = if self.config.sync.edge_number == 4 { 1 } else { 0 };
+                let sel = if self.config.sync.edge_number == 4 {
+                    1
+                } else {
+                    0
+                };
                 if let Some(i) = segmented_compact(ui, &[locale.edges_3, locale.edges_4], sel) {
                     self.config.sync.edge_number = if i == 1 { 4 } else { 3 };
                     changed = true;
@@ -957,9 +1127,11 @@ impl SettingsGui {
         // Detection area: how deep the LEDs look, and black-bar handling
         let now = ui.input(|i| i.time);
         let live_info = match (&self.frame, self.frame_at) {
-            (Some(fr), at) if now - at < 3.0 => {
-                Some((fr.depth_pct, fr.bars.0 * 100 / fr.h.max(1), fr.bars.2 * 100 / fr.w.max(1)))
-            }
+            (Some(fr), at) if now - at < 3.0 => Some((
+                fr.depth_pct,
+                fr.bars.0 * 100 / fr.h.max(1),
+                fr.bars.2 * 100 / fr.w.max(1),
+            )),
             _ => None,
         };
         section(ui, "Detection area", |ui| {
@@ -990,7 +1162,15 @@ impl SettingsGui {
                 );
             } else {
                 let mut depth = self.config.sync.edge_depth_pct as f32;
-                if slider_row(ui, "Depth from the screen edge", &mut depth, 3.0, 40.0, " %", 0) {
+                if slider_row(
+                    ui,
+                    "Depth from the screen edge",
+                    &mut depth,
+                    3.0,
+                    40.0,
+                    " %",
+                    0,
+                ) {
                     self.config.sync.edge_depth_pct = depth.round() as u8;
                     ch = true;
                 }
@@ -1003,7 +1183,12 @@ impl SettingsGui {
                     .color(theme::MUTED),
                 );
                 ui.add_space(4.0);
-                ch |= ui.checkbox(&mut self.config.sync.skip_black_bars, "Ignore black bars (letterboxed or pillarboxed video)").changed();
+                ch |= ui
+                    .checkbox(
+                        &mut self.config.sync.skip_black_bars,
+                        "Ignore black bars (letterboxed or pillarboxed video)",
+                    )
+                    .changed();
                 if self.config.sync.skip_black_bars {
                     let mut level = self.config.sync.black_level as f32;
                     if slider_row(ui, "Black level", &mut level, 2.0, 80.0, "", 0) {
@@ -1037,13 +1222,32 @@ impl SettingsGui {
                 self.save_and_apply(0.0);
             }
             ui.add_space(4.0);
-            if ui.checkbox(&mut self.config.sync.smoothing, locale.smoothing).changed() {
+            if ui
+                .checkbox(&mut self.config.sync.smoothing, locale.smoothing)
+                .changed()
+            {
                 self.save_and_apply(0.0);
             }
             if self.config.sync.smoothing {
                 let mut ch = false;
-                ch |= slider_row(ui, "Attack (getting brighter)", &mut self.config.sync.attack_ms, 0.0, 400.0, " ms", 0);
-                ch |= slider_row(ui, "Decay (getting darker)", &mut self.config.sync.decay_ms, 0.0, 1500.0, " ms", 0);
+                ch |= slider_row(
+                    ui,
+                    "Attack (getting brighter)",
+                    &mut self.config.sync.attack_ms,
+                    0.0,
+                    400.0,
+                    " ms",
+                    0,
+                );
+                ch |= slider_row(
+                    ui,
+                    "Decay (getting darker)",
+                    &mut self.config.sync.decay_ms,
+                    0.0,
+                    1500.0,
+                    " ms",
+                    0,
+                );
                 if ch {
                     self.save_and_apply(0.0);
                 }
@@ -1053,12 +1257,41 @@ impl SettingsGui {
         // Color
         section(ui, locale.color_processing, |ui| {
             let mut ch = false;
-            ch |= slider_row(ui, locale.saturation.trim_end_matches(':'), &mut self.config.sync.saturation, 0.0, 3.0, "", 2);
-            ch |= slider_row(ui, locale.gamma.trim_end_matches(':'), &mut self.config.sync.gamma, 0.3, 3.0, "", 2);
-            ch |= ui.checkbox(&mut self.config.sync.light_compression, locale.light_compression).changed();
+            ch |= slider_row(
+                ui,
+                locale.saturation.trim_end_matches(':'),
+                &mut self.config.sync.saturation,
+                0.0,
+                3.0,
+                "",
+                2,
+            );
+            ch |= slider_row(
+                ui,
+                locale.gamma.trim_end_matches(':'),
+                &mut self.config.sync.gamma,
+                0.3,
+                3.0,
+                "",
+                2,
+            );
+            ch |= ui
+                .checkbox(
+                    &mut self.config.sync.light_compression,
+                    locale.light_compression,
+                )
+                .changed();
             if self.config.sync.light_compression {
                 let mut pct = self.config.sync.power_limit_pct as f32;
-                ch |= slider_row(ui, "Power budget", &mut pct, 10.0, config::MAX_POWER_LIMIT_PCT as f32, " %", 0);
+                ch |= slider_row(
+                    ui,
+                    "Power budget",
+                    &mut pct,
+                    10.0,
+                    config::MAX_POWER_LIMIT_PCT as f32,
+                    " %",
+                    0,
+                );
                 self.config.sync.power_limit_pct = pct.round() as u8;
                 let (msg, col) = if self.config.sync.power_limit_pct > 60 {
                     ("High: very bright full-screen scenes draw a lot from the USB port. The app lowers itself if the strip starts dropping off.", theme::WARN)
@@ -1081,15 +1314,27 @@ impl SettingsGui {
             monitors::select(&self.monitors, cfg.monitor, &cfg.monitor_name)
         };
         match found {
-            Some(m) => format!("[{}] {} · {}x{}", m.global_index, short_gpu(&m.adapter_name), m.width, m.height),
-            None if !cfg.monitor_name.is_empty() => format!("\"{}\" (not connected, waiting)", cfg.monitor_name),
+            Some(m) => format!(
+                "[{}] {} · {}x{}",
+                m.global_index,
+                short_gpu(&m.adapter_name),
+                m.width,
+                m.height
+            ),
+            None if !cfg.monitor_name.is_empty() => {
+                format!("\"{}\" (not connected, waiting)", cfg.monitor_name)
+            }
             None => format!("Display #{} (not found)", cfg.monitor),
         }
     }
 
     fn draw_dynamic_tab(&mut self, ui: &mut egui::Ui) {
         let locale = self.locale;
-        ui.label(egui::RichText::new(locale.pattern_hint).size(12.0).color(theme::MUTED));
+        ui.label(
+            egui::RichText::new(locale.pattern_hint)
+                .size(12.0)
+                .color(theme::MUTED),
+        );
         ui.add_space(6.0);
 
         let colors = [
@@ -1101,7 +1346,14 @@ impl SettingsGui {
             Color32::from_rgb(40, 210, 215),
             Color32::from_rgb(255, 220, 60),
         ];
-        effect_grid(ui, "dynamic_grid", locale.dynamic_effects, &colors, &mut self.config.effect.dynamic_index, &mut self.dirty);
+        effect_grid(
+            ui,
+            "dynamic_grid",
+            locale.dynamic_effects,
+            &colors,
+            &mut self.config.effect.dynamic_index,
+            &mut self.dirty,
+        );
 
         ui.add_space(10.0);
         section(ui, locale.effect_speed, |ui| {
@@ -1117,14 +1369,28 @@ impl SettingsGui {
         let locale = self.locale;
 
         section(ui, locale.sound_source, |ui| {
-            let sel = if self.config.effect.rhythm_source == RhythmSource::Computer { 1 } else { 0 };
-            if let Some(i) = segmented_compact(ui, &[locale.source_controller, locale.source_computer], sel) {
-                self.config.effect.rhythm_source = if i == 1 { RhythmSource::Computer } else { RhythmSource::Controller };
+            let sel = if self.config.effect.rhythm_source == RhythmSource::Computer {
+                1
+            } else {
+                0
+            };
+            if let Some(i) =
+                segmented_compact(ui, &[locale.source_controller, locale.source_computer], sel)
+            {
+                self.config.effect.rhythm_source = if i == 1 {
+                    RhythmSource::Computer
+                } else {
+                    RhythmSource::Controller
+                };
                 self.save_and_apply(0.0);
             }
         });
 
-        ui.label(egui::RichText::new(locale.pattern_hint).size(12.0).color(theme::MUTED));
+        ui.label(
+            egui::RichText::new(locale.pattern_hint)
+                .size(12.0)
+                .color(theme::MUTED),
+        );
         ui.add_space(6.0);
 
         let colors = [
@@ -1136,7 +1402,14 @@ impl SettingsGui {
             Color32::from_rgb(90, 225, 225),
             Color32::from_rgb(255, 110, 200),
         ];
-        effect_grid(ui, "sound_grid", locale.sound_effects, &colors, &mut self.config.effect.sound_index, &mut self.dirty);
+        effect_grid(
+            ui,
+            "sound_grid",
+            locale.sound_effects,
+            &colors,
+            &mut self.config.effect.sound_index,
+            &mut self.dirty,
+        );
     }
 
     fn draw_static_tab(&mut self, ui: &mut egui::Ui) {
@@ -1148,11 +1421,22 @@ impl SettingsGui {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 64.0), egui::Sense::hover());
         let color = Color32::from_rgb(e.color_r, e.color_g, e.color_b);
         ui.painter().rect_filled(rect, 14.0, color);
-        ui.painter().rect_stroke(rect, 14.0, egui::Stroke::new(1.0_f32, theme::BORDER));
+        ui.painter()
+            .rect_stroke(rect, 14.0, egui::Stroke::new(1.0_f32, theme::BORDER));
         let hex = format!("#{:02X}{:02X}{:02X}", e.color_r, e.color_g, e.color_b);
         let lum = e.color_r as u16 * 3 + e.color_g as u16 * 6 + e.color_b as u16;
-        let text_c = if lum > 1280 { Color32::BLACK } else { Color32::WHITE };
-        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, hex, egui::FontId::monospace(17.0), text_c);
+        let text_c = if lum > 1280 {
+            Color32::BLACK
+        } else {
+            Color32::WHITE
+        };
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            hex,
+            egui::FontId::monospace(17.0),
+            text_c,
+        );
         ui.add_space(10.0);
 
         let mut color_changed = false;
@@ -1173,12 +1457,19 @@ impl SettingsGui {
         section(ui, locale.quick_select, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for &(name, [r, g, b]) in locale.color_presets {
-                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(40.0, 28.0), egui::Sense::click());
-                    ui.painter().rect_filled(rect, 8.0, Color32::from_rgb(r, g, b));
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(40.0, 28.0), egui::Sense::click());
+                    ui.painter()
+                        .rect_filled(rect, 8.0, Color32::from_rgb(r, g, b));
                     let is_sel = e.color_r == r && e.color_g == g && e.color_b == b;
                     if resp.hovered() || is_sel {
-                        let sc = if is_sel { theme::ACCENT } else { Color32::WHITE };
-                        ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(2.0_f32, sc));
+                        let sc = if is_sel {
+                            theme::ACCENT
+                        } else {
+                            Color32::WHITE
+                        };
+                        ui.painter()
+                            .rect_stroke(rect, 8.0, egui::Stroke::new(2.0_f32, sc));
                     }
                     if resp.clicked() {
                         e.color_r = r;
@@ -1197,13 +1488,26 @@ impl SettingsGui {
                 SoftEffect::Breathe => 1,
                 SoftEffect::Rotate => 2,
             };
-            if let Some(i) = segmented_compact(ui, &[locale.anim_none, locale.anim_breathe, locale.anim_rotate], sel) {
-                e.soft_effect = [SoftEffect::None, SoftEffect::Breathe, SoftEffect::Rotate][i].clone();
+            if let Some(i) = segmented_compact(
+                ui,
+                &[locale.anim_none, locale.anim_breathe, locale.anim_rotate],
+                sel,
+            ) {
+                e.soft_effect =
+                    [SoftEffect::None, SoftEffect::Breathe, SoftEffect::Rotate][i].clone();
                 color_changed = true;
             }
             if e.soft_effect != SoftEffect::None {
                 let mut v = e.effect_speed as f32;
-                if slider_row(ui, locale.speed.trim_end_matches(':'), &mut v, 5.0, 100.0, "", 0) {
+                if slider_row(
+                    ui,
+                    locale.speed.trim_end_matches(':'),
+                    &mut v,
+                    5.0,
+                    100.0,
+                    "",
+                    0,
+                ) {
                     e.effect_speed = v.round() as u8;
                     color_changed = true;
                 }
@@ -1254,7 +1558,12 @@ impl SettingsGui {
                 ui.end_row();
             });
             ui.add_space(4.0);
-            ch |= ui.checkbox(&mut self.config.capture.gpu_downscale, "GPU downscale (recommended: lowest CPU use)").changed();
+            ch |= ui
+                .checkbox(
+                    &mut self.config.capture.gpu_downscale,
+                    "GPU downscale (recommended: lowest CPU use)",
+                )
+                .changed();
             if ch {
                 self.save_and_apply(0.0);
             }
@@ -1262,13 +1571,18 @@ impl SettingsGui {
 
         section(ui, locale.app_section, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(locale.language_label.trim_end_matches(':')).color(theme::MUTED));
+                ui.label(
+                    egui::RichText::new(locale.language_label.trim_end_matches(':'))
+                        .color(theme::MUTED),
+                );
                 let sel = match self.config.app.language {
                     config::Language::Auto => 0,
                     config::Language::En => 1,
                     config::Language::Ko => 2,
                 };
-                if let Some(i) = segmented_compact(ui, &[locale.lang_auto, "English", "한국어"], sel) {
+                if let Some(i) =
+                    segmented_compact(ui, &[locale.lang_auto, "English", "한국어"], sel)
+                {
                     self.config.app.language = match i {
                         1 => config::Language::En,
                         2 => config::Language::Ko,
@@ -1284,10 +1598,22 @@ impl SettingsGui {
                     self.status_time = ui.input(|i| i.time);
                 }
             }
-            if ui.checkbox(&mut self.config.app.turn_off_on_sleep, locale.turn_off_on_sleep).changed() {
+            if ui
+                .checkbox(
+                    &mut self.config.app.turn_off_on_sleep,
+                    locale.turn_off_on_sleep,
+                )
+                .changed()
+            {
                 self.save_and_apply(0.0);
             }
-            if ui.checkbox(&mut self.config.app.turn_off_on_black, locale.turn_off_on_black).changed() {
+            if ui
+                .checkbox(
+                    &mut self.config.app.turn_off_on_black,
+                    locale.turn_off_on_black,
+                )
+                .changed()
+            {
                 self.save_and_apply(0.0);
             }
             ui.add_space(6.0);
@@ -1306,7 +1632,9 @@ impl SettingsGui {
                                 self.dirty = false;
                                 self.status_msg = "All saved data removed".into();
                             }
-                            Err(e) => self.status_msg = format!("{}{}", locale.save_failed_prefix, e),
+                            Err(e) => {
+                                self.status_msg = format!("{}{}", locale.save_failed_prefix, e)
+                            }
                         }
                         self.status_time = ui.input(|i| i.time);
                         self.confirm_forget = false;
@@ -1315,11 +1643,13 @@ impl SettingsGui {
                         self.confirm_forget = false;
                     }
                 });
-            } else if ui.button("Remove all saved settings from this PC").clicked() {
+            } else if ui
+                .button("Remove all saved settings from this PC")
+                .clicked()
+            {
                 self.confirm_forget = true;
             }
         });
-
     }
 }
 
@@ -1344,28 +1674,52 @@ impl SettingsGui {
                 (Some(f), true) => f,
                 _ => &self.demo,
             };
-            let tex = if live { self.frame_tex.as_ref() } else { self.demo_tex.as_ref() };
+            let tex = if live {
+                self.frame_tex.as_ref()
+            } else {
+                self.demo_tex.as_ref()
+            };
             let Some(tex) = tex else { return };
-            let bars = if params.skip_black_bars { fd.bars } else { (0, 0, 0, 0) };
-            let (geo, samples) = extractor::sample_edges(&fd.bgra, fd.w * 4, fd.w, fd.h, &params, bars);
+            let bars = if params.skip_black_bars {
+                fd.bars
+            } else {
+                (0, 0, 0, 0)
+            };
+            let (geo, samples) =
+                extractor::sample_edges(&fd.bgra, fd.w * 4, fd.w, fd.h, &params, bars);
             (fd.w, fd.h, geo, samples, tex.id())
         };
 
         let avail = ui.available_width();
         let scale = (avail / fw as f32).min(250.0 / fh as f32);
-        let (outer, resp) = ui.allocate_exact_size(egui::vec2(avail, fh as f32 * scale), egui::Sense::click_and_drag());
-        let rect = egui::Rect::from_center_size(outer.center(), egui::vec2(fw as f32 * scale, fh as f32 * scale));
+        let (outer, resp) = ui.allocate_exact_size(
+            egui::vec2(avail, fh as f32 * scale),
+            egui::Sense::click_and_drag(),
+        );
+        let rect = egui::Rect::from_center_size(
+            outer.center(),
+            egui::vec2(fw as f32 * scale, fh as f32 * scale),
+        );
         let painter = ui.painter().clone();
         let px = |x: usize| rect.left() + x as f32 * scale;
         let py = |y: usize| rect.top() + y as f32 * scale;
 
-        painter.image(tex_id, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+        painter.image(
+            tex_id,
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
 
         // black bars being ignored
         let red = Color32::from_rgba_unmultiplied(255, 70, 70, 95);
         let bar = |x0: f32, y0: f32, x1: f32, y1: f32| {
             if x1 - x0 > 0.5 && y1 - y0 > 0.5 {
-                painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)), 0.0, red);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)),
+                    0.0,
+                    red,
+                );
             }
         };
         bar(rect.left(), rect.top(), rect.right(), py(geo.t));
@@ -1377,19 +1731,47 @@ impl SettingsGui {
         let cell = |c: [u8; 3]| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 225);
         let (l, t, cw, ch) = (geo.l, geo.t, geo.cw, geo.ch);
         let fill = |x0: f32, y0: f32, x1: f32, y1: f32, c: [u8; 3]| {
-            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)).shrink(0.3), 0.0, cell(c));
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)).shrink(0.3),
+                0.0,
+                cell(c),
+            );
         };
         for (i, c) in samples.top.iter().enumerate() {
-            fill(px(l + cw * i / geo.segs_x), py(t), px(l + cw * (i + 1) / geo.segs_x), py(t + geo.depth_y), *c);
+            fill(
+                px(l + cw * i / geo.segs_x),
+                py(t),
+                px(l + cw * (i + 1) / geo.segs_x),
+                py(t + geo.depth_y),
+                *c,
+            );
         }
         for (i, c) in samples.bottom.iter().enumerate() {
-            fill(px(l + cw * i / geo.segs_x), py(fh - geo.b - geo.depth_y), px(l + cw * (i + 1) / geo.segs_x), py(fh - geo.b), *c);
+            fill(
+                px(l + cw * i / geo.segs_x),
+                py(fh - geo.b - geo.depth_y),
+                px(l + cw * (i + 1) / geo.segs_x),
+                py(fh - geo.b),
+                *c,
+            );
         }
         for (i, c) in samples.left.iter().enumerate() {
-            fill(px(l), py(t + ch * i / geo.segs_y), px(l + geo.depth_x), py(t + ch * (i + 1) / geo.segs_y), *c);
+            fill(
+                px(l),
+                py(t + ch * i / geo.segs_y),
+                px(l + geo.depth_x),
+                py(t + ch * (i + 1) / geo.segs_y),
+                *c,
+            );
         }
         for (i, c) in samples.right.iter().enumerate() {
-            fill(px(fw - geo.r - geo.depth_x), py(t + ch * i / geo.segs_y), px(fw - geo.r), py(t + ch * (i + 1) / geo.segs_y), *c);
+            fill(
+                px(fw - geo.r - geo.depth_x),
+                py(t + ch * i / geo.segs_y),
+                px(fw - geo.r),
+                py(t + ch * (i + 1) / geo.segs_y),
+                *c,
+            );
         }
 
         // inner edges of the strips are the draggable handles
@@ -1401,11 +1783,16 @@ impl SettingsGui {
             let tol = 9.0;
             let in_x = p.x >= px(l) - tol && p.x <= px(fw - geo.r) + tol;
             let in_y = p.y >= py(t) - tol && p.y <= py(fh - geo.b) + tol;
-            [(0u8, (p.y - top_in).abs(), in_x), (1, (p.y - bot_in).abs(), in_x), (2, (p.x - left_in).abs(), in_y), (3, (p.x - right_in).abs(), in_y)]
-                .iter()
-                .filter(|c| c.2 && c.1 <= tol)
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-                .map(|c| c.0)
+            [
+                (0u8, (p.y - top_in).abs(), in_x),
+                (1, (p.y - bot_in).abs(), in_x),
+                (2, (p.x - left_in).abs(), in_y),
+                (3, (p.x - right_in).abs(), in_y),
+            ]
+            .iter()
+            .filter(|c| c.2 && c.1 <= tol)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|c| c.0)
         };
         if resp.drag_started() {
             self.drag_edge = resp.interact_pointer_pos().and_then(hit);
@@ -1414,13 +1801,24 @@ impl SettingsGui {
                 resp.interact_pointer_pos(), self.drag_edge, top_in, bot_in, left_in, right_in
             );
         }
-        let active = if resp.dragged() { self.drag_edge } else { resp.hover_pos().and_then(hit) };
+        let active = if resp.dragged() {
+            self.drag_edge
+        } else {
+            resp.hover_pos().and_then(hit)
+        };
         if resp.drag_stopped() {
             self.drag_edge = None;
         }
         if resp.dragged() {
             if let (Some(edge), Some(p)) = (self.drag_edge, resp.interact_pointer_pos()) {
-                let pct = drag_depth_pct(edge, (p.x - rect.left()) / scale, (p.y - rect.top()) / scale, &geo, fw, fh);
+                let pct = drag_depth_pct(
+                    edge,
+                    (p.x - rect.left()) / scale,
+                    (p.y - rect.top()) / scale,
+                    &geo,
+                    fw,
+                    fh,
+                );
                 if pct != self.config.sync.edge_depth_pct || self.config.sync.detect_auto {
                     self.config.sync.edge_depth_pct = pct;
                     self.config.sync.detect_auto = false; // taking over by hand switches to manual
@@ -1429,19 +1827,42 @@ impl SettingsGui {
             }
         }
         if let Some(e) = active {
-            ui.ctx().set_cursor_icon(if e < 2 { egui::CursorIcon::ResizeVertical } else { egui::CursorIcon::ResizeHorizontal });
+            ui.ctx().set_cursor_icon(if e < 2 {
+                egui::CursorIcon::ResizeVertical
+            } else {
+                egui::CursorIcon::ResizeHorizontal
+            });
         }
 
         // outline each strip, light up the active edge, and mark all four handles
         let line = |a: egui::Pos2, b: egui::Pos2, on: bool| {
             let w = if on { 2.5_f32 } else { 1.0_f32 };
-            painter.line_segment([a, b], egui::Stroke::new(w, if on { Color32::WHITE } else { theme::ACCENT }));
+            painter.line_segment(
+                [a, b],
+                egui::Stroke::new(w, if on { Color32::WHITE } else { theme::ACCENT }),
+            );
         };
         let (x0, x1, y0, y1) = (px(l), px(fw - geo.r), py(t), py(fh - geo.b));
-        line(egui::pos2(x0, top_in), egui::pos2(x1, top_in), active == Some(0));
-        line(egui::pos2(x0, bot_in), egui::pos2(x1, bot_in), active == Some(1));
-        line(egui::pos2(left_in, y0), egui::pos2(left_in, y1), active == Some(2));
-        line(egui::pos2(right_in, y0), egui::pos2(right_in, y1), active == Some(3));
+        line(
+            egui::pos2(x0, top_in),
+            egui::pos2(x1, top_in),
+            active == Some(0),
+        );
+        line(
+            egui::pos2(x0, bot_in),
+            egui::pos2(x1, bot_in),
+            active == Some(1),
+        );
+        line(
+            egui::pos2(left_in, y0),
+            egui::pos2(left_in, y1),
+            active == Some(2),
+        );
+        line(
+            egui::pos2(right_in, y0),
+            egui::pos2(right_in, y1),
+            active == Some(3),
+        );
         painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, theme::BORDER));
         for (e, pos) in [
             (0u8, egui::pos2((x0 + x1) / 2.0, top_in)),
@@ -1474,7 +1895,12 @@ impl SettingsGui {
 // ── Widgets ──
 
 fn short_gpu(name: &str) -> String {
-    name.replace("(R)", "").replace("NVIDIA GeForce ", "").replace("Graphics", "").replace("  ", " ").trim().to_string()
+    name.replace("(R)", "")
+        .replace("NVIDIA GeForce ", "")
+        .replace("Graphics", "")
+        .replace("  ", " ")
+        .trim()
+        .to_string()
 }
 
 /// Rounded card container.
@@ -1493,7 +1919,12 @@ fn card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
 /// Titled card.
 fn section(ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui)) {
     card(ui, |ui| {
-        ui.label(egui::RichText::new(title).strong().size(13.0).color(theme::MUTED));
+        ui.label(
+            egui::RichText::new(title)
+                .strong()
+                .size(13.0)
+                .color(theme::MUTED),
+        );
         ui.add_space(4.0);
         content(ui);
     });
@@ -1511,9 +1942,11 @@ fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let t = ui.ctx().animate_bool_with_time(resp.id, *on, 0.15);
     let track = lerp_color(theme::CARD_HI, theme::GOOD.gamma_multiply(0.85), t);
     ui.painter().rect_filled(rect, 13.0, track);
-    ui.painter().rect_stroke(rect, 13.0, egui::Stroke::new(1.0_f32, theme::BORDER));
+    ui.painter()
+        .rect_stroke(rect, 13.0, egui::Stroke::new(1.0_f32, theme::BORDER));
     let cx = egui::lerp((rect.left() + 13.0)..=(rect.right() - 13.0), t);
-    ui.painter().circle_filled(egui::pos2(cx, rect.center().y), 9.5, Color32::WHITE);
+    ui.painter()
+        .circle_filled(egui::pos2(cx, rect.center().y), 9.5, Color32::WHITE);
     resp
 }
 
@@ -1523,8 +1956,19 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
 }
 
 /// Gradient slider; returns true while the value is being changed by the user.
-fn fat_slider(ui: &mut egui::Ui, value: &mut f32, min: f32, max: f32, from: Color32, to: Color32, h: f32) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::click_and_drag());
+fn fat_slider(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    min: f32,
+    max: f32,
+    from: Color32,
+    to: Color32,
+    h: f32,
+) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), h),
+        egui::Sense::click_and_drag(),
+    );
     let mut changed = false;
     let pad = h * 0.4;
     let th = (h * 0.4).clamp(6.0, 12.0);
@@ -1558,23 +2002,42 @@ fn fat_slider(ui: &mut egui::Ui, value: &mut f32, min: f32, max: f32, from: Colo
         mesh.add_triangle(0, 1, 2);
         mesh.add_triangle(0, 2, 3);
         ui.painter().add(egui::Shape::mesh(mesh));
-        ui.painter().circle_filled(fill.left_center() + egui::vec2(th / 4.0, 0.0), th / 2.0, c0);
+        ui.painter()
+            .circle_filled(fill.left_center() + egui::vec2(th / 4.0, 0.0), th / 2.0, c0);
     }
     let knob = egui::pos2(track.left() + fill_w, rect.center().y);
     let base = h * 0.38;
-    let r = if resp.dragged() || resp.hovered() { base * 1.12 } else { base };
-    ui.painter().circle_filled(knob, r + 3.0, to.gamma_multiply(0.18));
+    let r = if resp.dragged() || resp.hovered() {
+        base * 1.12
+    } else {
+        base
+    };
+    ui.painter()
+        .circle_filled(knob, r + 3.0, to.gamma_multiply(0.18));
     ui.painter().circle_filled(knob, r, Color32::WHITE);
-    ui.painter().circle_stroke(knob, r, egui::Stroke::new(2.0_f32, to));
+    ui.painter()
+        .circle_stroke(knob, r, egui::Stroke::new(2.0_f32, to));
     changed
 }
 
 /// Label + value on one line, slim gradient slider below. The one slider style for the app.
-fn slider_row(ui: &mut egui::Ui, label: &str, value: &mut f32, min: f32, max: f32, unit: &str, decimals: usize) -> bool {
+fn slider_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    min: f32,
+    max: f32,
+    unit: &str,
+    decimals: usize,
+) -> bool {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(label).size(12.5).color(theme::MUTED));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new(format!("{:.*}{}", decimals, *value, unit)).size(12.5).strong());
+            ui.label(
+                egui::RichText::new(format!("{:.*}{}", decimals, *value, unit))
+                    .size(12.5)
+                    .strong(),
+            );
         });
     });
     let changed = fat_slider(ui, value, min, max, theme::CARD_HI, theme::ACCENT, 22.0);
@@ -1587,7 +2050,11 @@ fn channel_slider(ui: &mut egui::Ui, label: &str, color: Color32, value: &mut f3
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(label).size(12.5).color(color).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new(format!("{:.0}", *value)).size(12.5).strong());
+            ui.label(
+                egui::RichText::new(format!("{:.0}", *value))
+                    .size(12.5)
+                    .strong(),
+            );
         });
     });
     let changed = fat_slider(ui, value, 0.0, 255.0, theme::CARD_HI, color, 22.0);
@@ -1598,13 +2065,25 @@ fn channel_slider(ui: &mut egui::Ui, label: &str, color: Color32, value: &mut f3
 /// Rounded status pill with a colored dot; returns the click response.
 fn status_chip(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
     let font = egui::FontId::proportional(12.0);
-    let galley = ui.painter().layout_no_wrap(text.to_string(), font, theme::TEXT);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font, theme::TEXT);
     let size = egui::vec2(galley.size().x + 32.0, 26.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-    ui.painter().rect_filled(rect, 13.0, color.gamma_multiply(0.14));
-    ui.painter().rect_stroke(rect, 13.0, egui::Stroke::new(1.0_f32, color.gamma_multiply(0.5)));
-    ui.painter().circle_filled(egui::pos2(rect.left() + 13.0, rect.center().y), 4.0, color);
-    ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - galley.size().y / 2.0), galley, theme::TEXT);
+    ui.painter()
+        .rect_filled(rect, 13.0, color.gamma_multiply(0.14));
+    ui.painter().rect_stroke(
+        rect,
+        13.0,
+        egui::Stroke::new(1.0_f32, color.gamma_multiply(0.5)),
+    );
+    ui.painter()
+        .circle_filled(egui::pos2(rect.left() + 13.0, rect.center().y), 4.0, color);
+    ui.painter().galley(
+        egui::pos2(rect.left() + 24.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        theme::TEXT,
+    );
     resp
 }
 
@@ -1621,8 +2100,16 @@ fn paint_background(ctx: &egui::Context) {
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
     painter.add(egui::Shape::mesh(mesh));
-    painter.circle_filled(rect.left_top() + egui::vec2(60.0, 40.0), 240.0, theme::ACCENT.gamma_multiply(0.035));
-    painter.circle_filled(rect.right_top() + egui::vec2(-40.0, 120.0), 200.0, Color32::from_rgb(170, 112, 255).gamma_multiply(0.03));
+    painter.circle_filled(
+        rect.left_top() + egui::vec2(60.0, 40.0),
+        240.0,
+        theme::ACCENT.gamma_multiply(0.035),
+    );
+    painter.circle_filled(
+        rect.right_top() + egui::vec2(-40.0, 120.0),
+        200.0,
+        Color32::from_rgb(170, 112, 255).gamma_multiply(0.03),
+    );
 }
 
 /// Full-width segmented control. `selected = None` shows nothing selected.
@@ -1634,15 +2121,31 @@ fn segmented_compact(ui: &mut egui::Ui, labels: &[&str], selected: usize) -> Opt
     segmented_compact_opt(ui, labels, Some(selected))
 }
 
-fn segmented_compact_opt(ui: &mut egui::Ui, labels: &[&str], selected: Option<usize>) -> Option<usize> {
+fn segmented_compact_opt(
+    ui: &mut egui::Ui,
+    labels: &[&str],
+    selected: Option<usize>,
+) -> Option<usize> {
     let w = ui.available_width();
     segmented_inner(ui, labels, selected, w, 32.0, 12.5)
 }
 
-fn segmented_inner(ui: &mut egui::Ui, labels: &[&str], selected: Option<usize>, width: f32, height: f32, font: f32) -> Option<usize> {
+fn segmented_inner(
+    ui: &mut egui::Ui,
+    labels: &[&str],
+    selected: Option<usize>,
+    width: f32,
+    height: f32,
+    font: f32,
+) -> Option<usize> {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-    ui.painter().rect_filled(rect, height / 2.0, Color32X::INPUT);
-    ui.painter().rect_stroke(rect, height / 2.0, egui::Stroke::new(1.0_f32, theme::BORDER));
+    ui.painter()
+        .rect_filled(rect, height / 2.0, Color32X::INPUT);
+    ui.painter().rect_stroke(
+        rect,
+        height / 2.0,
+        egui::Stroke::new(1.0_f32, theme::BORDER),
+    );
     let n = labels.len().max(1);
     let seg_w = (rect.width() - 6.0) / n as f32;
     let mut clicked = None;
@@ -1654,17 +2157,29 @@ fn segmented_inner(ui: &mut egui::Ui, labels: &[&str], selected: Option<usize>, 
         let resp = ui.interact(seg, ui.id().with(("seg", label, i)), egui::Sense::click());
         let is_sel = selected == Some(i);
         if is_sel {
-            ui.painter().rect_filled(seg, (height - 6.0) / 2.0, theme::ACCENT);
+            ui.painter()
+                .rect_filled(seg, (height - 6.0) / 2.0, theme::ACCENT);
         } else if resp.hovered() {
-            ui.painter().rect_filled(seg, (height - 6.0) / 2.0, Color32X::HOVER);
+            ui.painter()
+                .rect_filled(seg, (height - 6.0) / 2.0, Color32X::HOVER);
         }
-        let col = if is_sel { Color32::from_rgb(8, 14, 22) } else { theme::MUTED };
+        let col = if is_sel {
+            Color32::from_rgb(8, 14, 22)
+        } else {
+            theme::MUTED
+        };
         ui.painter().text(
             seg.center(),
             egui::Align2::CENTER_CENTER,
             label,
             egui::FontId::proportional(font),
-            if is_sel { col } else if resp.hovered() { theme::TEXT } else { col },
+            if is_sel {
+                col
+            } else if resp.hovered() {
+                theme::TEXT
+            } else {
+                col
+            },
         );
         if resp.clicked() {
             clicked = Some(i);
@@ -1678,39 +2193,67 @@ enum PreviewSource<'a> {
     /// The real colors the engine is sending (LED i at its fixed position on the strip).
     Live(&'a [[u8; 3]]),
     /// LED order as a rainbow (red = first LED); `reverse` flips which end is the start.
-    Spectrum { reverse: bool },
+    Spectrum {
+        reverse: bool,
+    },
     Solid(Color32),
 }
 
 /// Monitor outline with the LED strip drawn around it, one dot per LED.
-fn draw_layout_preview(ui: &mut egui::Ui, lamps: u32, edges: u8, depth_pct: Option<u8>, source: PreviewSource) {
+fn draw_layout_preview(
+    ui: &mut egui::Ui,
+    lamps: u32,
+    edges: u8,
+    depth_pct: Option<u8>,
+    source: PreviewSource,
+) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 170.0), egui::Sense::hover());
     let sw = (w * 0.66).min(340.0);
-    let screen = egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 2.0), egui::vec2(sw, sw * 0.42));
+    let screen = egui::Rect::from_center_size(
+        rect.center() + egui::vec2(0.0, 2.0),
+        egui::vec2(sw, sw * 0.42),
+    );
 
     // faint ambient tint inside the monitor from the average LED color
     let tint = match &source {
         PreviewSource::Live(l) if !l.is_empty() => {
             let n = l.len() as u32;
-            let (r, g, b) = l.iter().fold((0u32, 0u32, 0u32), |a, c| (a.0 + c[0] as u32, a.1 + c[1] as u32, a.2 + c[2] as u32));
-            lerp_color(Color32X::INPUT, Color32::from_rgb((r / n) as u8, (g / n) as u8, (b / n) as u8), 0.22)
+            let (r, g, b) = l.iter().fold((0u32, 0u32, 0u32), |a, c| {
+                (a.0 + c[0] as u32, a.1 + c[1] as u32, a.2 + c[2] as u32)
+            });
+            lerp_color(
+                Color32X::INPUT,
+                Color32::from_rgb((r / n) as u8, (g / n) as u8, (b / n) as u8),
+                0.22,
+            )
         }
         PreviewSource::Solid(c) => lerp_color(Color32X::INPUT, *c, 0.18),
         _ => Color32X::INPUT,
     };
     ui.painter().rect_filled(screen, 8.0, tint);
-    ui.painter().rect_stroke(screen, 8.0, egui::Stroke::new(1.5_f32, theme::BORDER));
+    ui.painter()
+        .rect_stroke(screen, 8.0, egui::Stroke::new(1.5_f32, theme::BORDER));
     // the area the LEDs actually look at: an inner outline `depth_pct` in from each edge
     if let Some(d) = depth_pct {
-        let inset = egui::vec2(screen.width() * d as f32 / 100.0, screen.height() * d as f32 / 100.0);
+        let inset = egui::vec2(
+            screen.width() * d as f32 / 100.0,
+            screen.height() * d as f32 / 100.0,
+        );
         let inner = egui::Rect::from_min_max(screen.min + inset, screen.max - inset);
         if inner.width() > 4.0 && inner.height() > 4.0 {
-            ui.painter().rect_stroke(inner, 4.0, egui::Stroke::new(1.0_f32, theme::ACCENT.gamma_multiply(0.55)));
+            ui.painter().rect_stroke(
+                inner,
+                4.0,
+                egui::Stroke::new(1.0_f32, theme::ACCENT.gamma_multiply(0.55)),
+            );
         }
     }
     ui.painter().line_segment(
-        [egui::pos2(screen.center().x - 30.0, screen.bottom() + 14.0), egui::pos2(screen.center().x + 30.0, screen.bottom() + 14.0)],
+        [
+            egui::pos2(screen.center().x - 30.0, screen.bottom() + 14.0),
+            egui::pos2(screen.center().x + 30.0, screen.bottom() + 14.0),
+        ],
         egui::Stroke::new(3.0_f32, theme::BORDER),
     );
 
@@ -1760,30 +2303,44 @@ fn draw_layout_preview(ui: &mut egui::Ui, lamps: u32, edges: u8, depth_pct: Opti
         ui.painter().circle_filled(pos, 2.8, theme::BORDER);
         let lum = color.r() as u16 + color.g() as u16 + color.b() as u16;
         if lum > 24 {
-            ui.painter().circle_filled(pos, 12.0, color.gamma_multiply(0.07));
-            ui.painter().circle_filled(pos, 7.0, color.gamma_multiply(0.18));
+            ui.painter()
+                .circle_filled(pos, 12.0, color.gamma_multiply(0.07));
+            ui.painter()
+                .circle_filled(pos, 7.0, color.gamma_multiply(0.18));
             ui.painter().circle_filled(pos, 3.8, color);
         }
     }
 }
 
 /// Grid of selectable effect tiles; returns nothing, updates `index` and `dirty`.
-fn effect_grid(ui: &mut egui::Ui, id: &str, names: &[&str], colors: &[Color32], index: &mut u8, dirty: &mut bool) {
+fn effect_grid(
+    ui: &mut egui::Ui,
+    id: &str,
+    names: &[&str],
+    colors: &[Color32],
+    index: &mut u8,
+    dirty: &mut bool,
+) {
     let cols = 3;
-    let tile_w = ((ui.available_width() - 20.0) / cols as f32).floor().max(100.0);
-    egui::Grid::new(id).num_columns(cols).spacing([10.0, 10.0]).show(ui, |ui| {
-        for (i, name) in names.iter().enumerate() {
-            let selected = *index == i as u8;
-            let color = colors[i % colors.len()];
-            if effect_button(ui, name, color, selected, tile_w) {
-                *index = i as u8;
-                *dirty = true;
+    let tile_w = ((ui.available_width() - 20.0) / cols as f32)
+        .floor()
+        .max(100.0);
+    egui::Grid::new(id)
+        .num_columns(cols)
+        .spacing([10.0, 10.0])
+        .show(ui, |ui| {
+            for (i, name) in names.iter().enumerate() {
+                let selected = *index == i as u8;
+                let color = colors[i % colors.len()];
+                if effect_button(ui, name, color, selected, tile_w) {
+                    *index = i as u8;
+                    *dirty = true;
+                }
+                if (i + 1) % cols == 0 {
+                    ui.end_row();
+                }
             }
-            if (i + 1) % cols == 0 {
-                ui.end_row();
-            }
-        }
-    });
+        });
 }
 
 fn effect_button(ui: &mut egui::Ui, name: &str, color: Color32, selected: bool, w: f32) -> bool {
@@ -1797,8 +2354,16 @@ fn effect_button(ui: &mut egui::Ui, name: &str, color: Color32, selected: bool, 
         theme::CARD
     };
     ui.painter().rect_filled(rect, 12.0, bg);
-    ui.painter().rect_stroke(rect, 12.0, egui::Stroke::new(if selected { 2.0_f32 } else { 1.0_f32 }, if selected { color } else { theme::BORDER }));
-    ui.painter().circle_filled(rect.left_center() + egui::vec2(16.0, 0.0), 5.0, color);
+    ui.painter().rect_stroke(
+        rect,
+        12.0,
+        egui::Stroke::new(
+            if selected { 2.0_f32 } else { 1.0_f32 },
+            if selected { color } else { theme::BORDER },
+        ),
+    );
+    ui.painter()
+        .circle_filled(rect.left_center() + egui::vec2(16.0, 0.0), 5.0, color);
     ui.painter().text(
         rect.left_center() + egui::vec2(30.0, 0.0),
         egui::Align2::LEFT_CENTER,
@@ -1816,7 +2381,13 @@ mod illustration_tests {
     use crate::color::extractor::geometry;
 
     fn geo(depth: u8, bars: (usize, usize, usize, usize)) -> Geometry {
-        let p = EdgeParams { depth_pct: depth, skip_black_bars: true, black_level: 18, reverse: false, edge_number: 3 };
+        let p = EdgeParams {
+            depth_pct: depth,
+            skip_black_bars: true,
+            black_level: 18,
+            reverse: false,
+            edge_number: 3,
+        };
         geometry(160, 90, &p, bars)
     }
 

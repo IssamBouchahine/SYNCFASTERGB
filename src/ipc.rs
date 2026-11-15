@@ -10,8 +10,8 @@
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Memory::{
-    CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE,
-    MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
+    CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ,
+    FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
 };
 
 /// Shared-memory name used by the app.
@@ -45,7 +45,15 @@ impl LedShare {
         let w = wide(name);
         // SAFETY: plain Win32 calls with valid arguments; failures are handled below.
         unsafe {
-            let map = CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE, 0, SIZE as u32, PCWSTR(w.as_ptr())).ok()?;
+            let map = CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                None,
+                PAGE_READWRITE,
+                0,
+                SIZE as u32,
+                PCWSTR(w.as_ptr()),
+            )
+            .ok()?;
             let view = MapViewOfFile(map, FILE_MAP_WRITE, 0, 0, SIZE);
             if view.Value.is_null() {
                 let _ = CloseHandle(map);
@@ -113,7 +121,8 @@ impl LedView {
         unsafe {
             let base = self.view.Value as *const u8;
             let seq = u32::from_le(std::ptr::read_volatile(base as *const u32));
-            let n = (u32::from_le(std::ptr::read_volatile(base.add(4) as *const u32)) as usize).min(MAX_LEDS);
+            let n = (u32::from_le(std::ptr::read_volatile(base.add(4) as *const u32)) as usize)
+                .min(MAX_LEDS);
             if n == 0 {
                 return None;
             }
@@ -147,7 +156,12 @@ const FRAME_SIZE: usize = FRAME_HEADER + MAX_FRAME_W * MAX_FRAME_H * 4;
 
 /// Reduce a BGRA frame to at most MAX_FRAME_W x MAX_FRAME_H by nearest-neighbour sampling,
 /// dropping row padding. Returns (width, height, step, pixels).
-pub fn shrink_bgra(data: &[u8], pitch: usize, w: usize, h: usize) -> (usize, usize, usize, Vec<u8>) {
+pub fn shrink_bgra(
+    data: &[u8],
+    pitch: usize,
+    w: usize,
+    h: usize,
+) -> (usize, usize, usize, Vec<u8>) {
     let step = w.div_ceil(MAX_FRAME_W).max(h.div_ceil(MAX_FRAME_H)).max(1);
     let (ow, oh) = ((w / step).max(1), (h / step).max(1));
     let mut out = vec![255u8; ow * oh * 4];
@@ -182,7 +196,15 @@ impl FrameShare {
         let w = wide(name);
         // SAFETY: plain Win32 calls with valid arguments; failures are handled below.
         unsafe {
-            let map = CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE, 0, FRAME_SIZE as u32, PCWSTR(w.as_ptr())).ok()?;
+            let map = CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                None,
+                PAGE_READWRITE,
+                0,
+                FRAME_SIZE as u32,
+                PCWSTR(w.as_ptr()),
+            )
+            .ok()?;
             let view = MapViewOfFile(map, FILE_MAP_WRITE, 0, 0, FRAME_SIZE);
             if view.Value.is_null() {
                 let _ = CloseHandle(map);
@@ -193,12 +215,28 @@ impl FrameShare {
     }
 
     /// Publish a BGRA frame with the black bars currently skipped (top, bottom, left, right).
-    pub fn publish_bgra(&mut self, data: &[u8], pitch: usize, w: usize, h: usize, bars: (usize, usize, usize, usize), depth_pct: u8) {
+    pub fn publish_bgra(
+        &mut self,
+        data: &[u8],
+        pitch: usize,
+        w: usize,
+        h: usize,
+        bars: (usize, usize, usize, usize),
+        depth_pct: u8,
+    ) {
         if w == 0 || h == 0 {
             return;
         }
         let (ow, oh, step, pixels) = shrink_bgra(data, pitch, w, h);
-        let header = [ow as u32, oh as u32, (bars.0 / step) as u32, (bars.1 / step) as u32, (bars.2 / step) as u32, (bars.3 / step) as u32, depth_pct as u32];
+        let header = [
+            ow as u32,
+            oh as u32,
+            (bars.0 / step) as u32,
+            (bars.1 / step) as u32,
+            (bars.2 / step) as u32,
+            (bars.3 / step) as u32,
+            depth_pct as u32,
+        ];
         // SAFETY: `view` points to FRAME_SIZE writable bytes for the lifetime of `self`;
         // ow <= MAX_FRAME_W and oh <= MAX_FRAME_H, so FRAME_HEADER + ow*oh*4 <= FRAME_SIZE.
         unsafe {
@@ -269,16 +307,29 @@ impl FrameView {
         // are clamped/validated below before they are used for the copy length.
         unsafe {
             let base = self.view.Value as *const u8;
-            let rd = |off: usize| u32::from_le(std::ptr::read_volatile(base.add(off) as *const u32)) as usize;
+            let rd = |off: usize| {
+                u32::from_le(std::ptr::read_volatile(base.add(off) as *const u32)) as usize
+            };
             let (seq, w, h) = (rd(0) as u32, rd(4), rd(8));
             if w == 0 || h == 0 || w > MAX_FRAME_W || h > MAX_FRAME_H {
                 return None;
             }
             let bars = (rd(12).min(h), rd(16).min(h), rd(20).min(w), rd(24).min(w));
-            let depth_pct = if rd(28) == 0 { 15 } else { rd(28).clamp(3, 40) as u8 };
+            let depth_pct = if rd(28) == 0 {
+                15
+            } else {
+                rd(28).clamp(3, 40) as u8
+            };
             let mut bgra = vec![0u8; w * h * 4];
             std::ptr::copy_nonoverlapping(base.add(FRAME_HEADER), bgra.as_mut_ptr(), bgra.len());
-            Some(FrameSnapshot { seq, w, h, bars, depth_pct, bgra })
+            Some(FrameSnapshot {
+                seq,
+                w,
+                h,
+                bars,
+                depth_pct,
+                bgra,
+            })
         }
     }
 }
@@ -369,9 +420,15 @@ mod tests {
         // corrupt the shared header from the writer's side: absurd width
         // SAFETY: test-only write into the writer's own mapping header.
         unsafe {
-            std::ptr::write_volatile((w.view.Value as *mut u8).add(4) as *mut u32, 1_000_000u32.to_le());
+            std::ptr::write_volatile(
+                (w.view.Value as *mut u8).add(4) as *mut u32,
+                1_000_000u32.to_le(),
+            );
         }
-        assert!(r.read().is_none(), "oversized dimensions are refused, not trusted");
+        assert!(
+            r.read().is_none(),
+            "oversized dimensions are refused, not trusted"
+        );
     }
 
     #[test]

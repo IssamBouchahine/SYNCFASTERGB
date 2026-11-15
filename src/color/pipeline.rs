@@ -40,7 +40,10 @@ impl Smoother {
         let dt = dt_ms.clamp(0.0, 500.0);
 
         if self.state.len() != target.len() {
-            self.state = target.iter().map(|c| [c[0] as f32, c[1] as f32, c[2] as f32]).collect();
+            self.state = target
+                .iter()
+                .map(|c| [c[0] as f32, c[1] as f32, c[2] as f32])
+                .collect();
             self.last_out = target.to_vec();
             return self.last_out.clone();
         }
@@ -49,26 +52,47 @@ impl Smoother {
         if !target.is_empty() {
             let mut sum = 0.0;
             for (s, t) in self.state.iter().zip(target) {
-                let d = (0..3).map(|k| (t[k] as f32 - s[k]).abs()).fold(0.0, f32::max);
+                let d = (0..3)
+                    .map(|k| (t[k] as f32 - s[k]).abs())
+                    .fold(0.0, f32::max);
                 sum += d;
             }
             if sum / target.len() as f32 > self.cut_threshold {
-                self.state = target.iter().map(|c| [c[0] as f32, c[1] as f32, c[2] as f32]).collect();
+                self.state = target
+                    .iter()
+                    .map(|c| [c[0] as f32, c[1] as f32, c[2] as f32])
+                    .collect();
                 self.last_out = target.to_vec();
                 return self.last_out.clone();
             }
         }
 
         for i in 0..target.len() {
-            let t = [target[i][0] as f32, target[i][1] as f32, target[i][2] as f32];
-            let tau = if luma(t) >= luma(self.state[i]) { self.attack_ms } else { self.decay_ms };
+            let t = [
+                target[i][0] as f32,
+                target[i][1] as f32,
+                target[i][2] as f32,
+            ];
+            let tau = if luma(t) >= luma(self.state[i]) {
+                self.attack_ms
+            } else {
+                self.decay_ms
+            };
             // alpha is shared by all channels of one LED so hue does not drift.
-            let alpha = if tau <= 0.0 { 1.0 } else { 1.0 - (-dt / tau).exp() };
+            let alpha = if tau <= 0.0 {
+                1.0
+            } else {
+                1.0 - (-dt / tau).exp()
+            };
             for k in 0..3 {
                 self.state[i][k] += (t[k] - self.state[i][k]) * alpha;
                 let want = self.state[i][k].round().clamp(0.0, 255.0);
                 let last = self.last_out[i][k] as f32;
-                if (want - last).abs() >= self.deadband || want == 0.0 || want == 255.0 || self.deadband <= 0.0 {
+                if (want - last).abs() >= self.deadband
+                    || want == 0.0
+                    || want == 255.0
+                    || self.deadband <= 0.0
+                {
                     self.last_out[i][k] = want as u8;
                 }
             }
@@ -116,7 +140,11 @@ fn knee(c: [u8; 3], lo: u8, hi: u8) -> [u8; 3] {
         return c;
     }
     let f = (m - lo) as f32 / (hi - lo) as f32;
-    [(c[0] as f32 * f) as u8, (c[1] as f32 * f) as u8, (c[2] as f32 * f) as u8]
+    [
+        (c[0] as f32 * f) as u8,
+        (c[1] as f32 * f) as u8,
+        (c[2] as f32 * f) as u8,
+    ]
 }
 
 /// A dominant channel (>=200) with two weak ones (<=50) becomes a clean primary.
@@ -151,7 +179,11 @@ fn saturate(c: [u8; 3], gain: f32) -> [u8; 3] {
     if (gain - 1.0).abs() < 1e-3 {
         return c;
     }
-    let (rf, gf, bf) = (c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0);
+    let (rf, gf, bf) = (
+        c[0] as f32 / 255.0,
+        c[1] as f32 / 255.0,
+        c[2] as f32 / 255.0,
+    );
     let max = rf.max(gf).max(bf);
     let min = rf.min(gf).min(bf);
     let l = (max + min) / 2.0;
@@ -159,7 +191,11 @@ fn saturate(c: [u8; 3], gain: f32) -> [u8; 3] {
     if delta < 0.001 {
         return c;
     }
-    let s = if l > 0.5 { delta / (2.0 - max - min) } else { delta / (max + min) };
+    let s = if l > 0.5 {
+        delta / (2.0 - max - min)
+    } else {
+        delta / (max + min)
+    };
     let mut h = if (max - rf).abs() < 0.001 {
         (gf - bf) / delta + if gf < bf { 6.0 } else { 0.0 }
     } else if (max - gf).abs() < 0.001 {
@@ -188,7 +224,11 @@ fn saturate(c: [u8; 3], gain: f32) -> [u8; 3] {
         }
         p
     };
-    let q = if l < 0.5 { l * (1.0 + ns) } else { l + ns - l * ns };
+    let q = if l < 0.5 {
+        l * (1.0 + ns)
+    } else {
+        l + ns - l * ns
+    };
     let p = 2.0 * l - q;
     let to8 = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
     [
@@ -202,7 +242,11 @@ fn apply_gamma(c: [u8; 3], gamma: f32) -> [u8; 3] {
     if (gamma - 1.0).abs() < 1e-3 {
         return c;
     }
-    let f = |v: u8| ((v as f32 / 255.0).powf(gamma) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let f = |v: u8| {
+        ((v as f32 / 255.0).powf(gamma) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
     [f(c[0]), f(c[1]), f(c[2])]
 }
 
@@ -213,8 +257,15 @@ pub fn limit_total_power(leds: &mut [[u8; 3]], max_fraction: f32) {
     if leds.is_empty() {
         return;
     }
-    let f = if max_fraction.is_nan() { 1.0 } else { max_fraction.clamp(0.0, 1.0) };
-    let total: u64 = leds.iter().map(|c| c[0] as u64 + c[1] as u64 + c[2] as u64).sum();
+    let f = if max_fraction.is_nan() {
+        1.0
+    } else {
+        max_fraction.clamp(0.0, 1.0)
+    };
+    let total: u64 = leds
+        .iter()
+        .map(|c| c[0] as u64 + c[1] as u64 + c[2] as u64)
+        .sum();
     let allowed = (leds.len() as f64) * 765.0 * f as f64;
     if (total as f64) <= allowed || total == 0 {
         return;
@@ -232,7 +283,10 @@ pub fn power_fraction(leds: &[[u8; 3]]) -> f32 {
     if leds.is_empty() {
         return 0.0;
     }
-    let total: u64 = leds.iter().map(|c| c[0] as u64 + c[1] as u64 + c[2] as u64).sum();
+    let total: u64 = leds
+        .iter()
+        .map(|c| c[0] as u64 + c[1] as u64 + c[2] as u64)
+        .sum();
     (total as f64 / (leds.len() as f64 * 765.0)) as f32
 }
 
@@ -253,7 +307,11 @@ fn scale(c: [u8; 3], b: f32) -> [u8; 3] {
     if b >= 0.999 {
         return c;
     }
-    [(c[0] as f32 * b).round() as u8, (c[1] as f32 * b).round() as u8, (c[2] as f32 * b).round() as u8]
+    [
+        (c[0] as f32 * b).round() as u8,
+        (c[1] as f32 * b).round() as u8,
+        (c[2] as f32 * b).round() as u8,
+    ]
 }
 
 #[cfg(test)]
@@ -267,7 +325,10 @@ mod tests {
     #[test]
     fn first_frame_passes_through() {
         let mut s = Smoother::new(40.0, 250.0, 2.0);
-        assert_eq!(s.update(&solid(3, [10, 20, 30]), 33.0), solid(3, [10, 20, 30]));
+        assert_eq!(
+            s.update(&solid(3, [10, 20, 30]), 33.0),
+            solid(3, [10, 20, 30])
+        );
     }
 
     #[test]
@@ -304,7 +365,11 @@ mod tests {
         for _ in 0..200 {
             out = s.update(&solid(1, [200, 100, 50]), 33.0)[0];
         }
-        assert!((out[0] as i32 - 200).abs() <= 2 && (out[1] as i32 - 100).abs() <= 2 && (out[2] as i32 - 50).abs() <= 2);
+        assert!(
+            (out[0] as i32 - 200).abs() <= 2
+                && (out[1] as i32 - 100).abs() <= 2
+                && (out[2] as i32 - 50).abs() <= 2
+        );
     }
 
     #[test]
@@ -312,9 +377,15 @@ mod tests {
         let mut s = Smoother::new(0.0, 0.0, 3.0);
         s.update(&solid(1, [100, 100, 100]), 33.0);
         // +-2 jitter stays invisible
-        assert_eq!(s.update(&solid(1, [102, 98, 101]), 33.0)[0], [100, 100, 100]);
+        assert_eq!(
+            s.update(&solid(1, [102, 98, 101]), 33.0)[0],
+            [100, 100, 100]
+        );
         // a real change passes
-        assert_eq!(s.update(&solid(1, [110, 100, 100]), 33.0)[0], [110, 100, 100]);
+        assert_eq!(
+            s.update(&solid(1, [110, 100, 100]), 33.0)[0],
+            [110, 100, 100]
+        );
     }
 
     #[test]
@@ -380,10 +451,20 @@ mod tests {
     fn power_limit_scales_everything_together_when_over_budget() {
         let mut leds = vec![[255, 255, 255]; 71];
         limit_total_power(&mut leds, 0.5);
-        let sum: u64 = leds.iter().map(|c| c.iter().map(|&v| v as u64).sum::<u64>()).sum();
+        let sum: u64 = leds
+            .iter()
+            .map(|c| c.iter().map(|&v| v as u64).sum::<u64>())
+            .sum();
         assert!(sum as f64 <= 71.0 * 765.0 * 0.5 + 1.0);
-        assert!(leds.iter().all(|c| *c == leds[0]), "uniform scene stays uniform");
-        assert!(leds[0][0] >= 126, "about half brightness, not less: {}", leds[0][0]);
+        assert!(
+            leds.iter().all(|c| *c == leds[0]),
+            "uniform scene stays uniform"
+        );
+        assert!(
+            leds[0][0] >= 126,
+            "about half brightness, not less: {}",
+            leds[0][0]
+        );
     }
 
     #[test]
@@ -414,8 +495,15 @@ mod tests {
     #[test]
     fn grade_applies_saturation_to_bright_pixels() {
         // stock bug: bright pixels lost the saturation boost entirely
-        let g = Grade { purify: false, ..Grade::default() };
-        let plain = Grade { saturation_gain: 1.0, purify: false, ..Grade::default() };
+        let g = Grade {
+            purify: false,
+            ..Grade::default()
+        };
+        let plain = Grade {
+            saturation_gain: 1.0,
+            purify: false,
+            ..Grade::default()
+        };
         let a = grade([220, 160, 140], &g);
         let b = grade([220, 160, 140], &plain);
         assert!((a[0] as i32 - a[2] as i32) > (b[0] as i32 - b[2] as i32));
@@ -431,13 +519,25 @@ mod tests {
     #[test]
     fn brightness_scales_output_last() {
         let full = Grade::default();
-        let half = Grade { brightness: 0.5, ..Grade::default() };
+        let half = Grade {
+            brightness: 0.5,
+            ..Grade::default()
+        };
         let a = grade([200, 40, 40], &full);
         let b = grade([200, 40, 40], &half);
         for k in 0..3 {
             assert!((b[k] as i32 - (a[k] as f32 * 0.5).round() as i32).abs() <= 1);
         }
-        assert_eq!(grade([200, 200, 200], &Grade { brightness: 0.0, ..full }), [0, 0, 0]);
+        assert_eq!(
+            grade(
+                [200, 200, 200],
+                &Grade {
+                    brightness: 0.0,
+                    ..full
+                }
+            ),
+            [0, 0, 0]
+        );
         assert_eq!(scale([10, 20, 30], f32::NAN), [10, 20, 30]);
         assert_eq!(scale([10, 20, 30], 9.0), [10, 20, 30]);
     }
@@ -447,5 +547,4 @@ mod tests {
         assert_eq!(purify([210, 30, 20]), [255, 0, 0]);
         assert_eq!(purify([100, 100, 100]), [100, 100, 100]);
     }
-
 }

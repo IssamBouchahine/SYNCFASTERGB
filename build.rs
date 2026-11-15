@@ -69,7 +69,7 @@ fn rgba_to_bmp(rgba: &[u8], size: u32) -> Vec<u8> {
             let idx = ((y * size + x) * 4) as usize;
             data.push(rgba[idx + 2]); // B
             data.push(rgba[idx + 1]); // G
-            data.push(rgba[idx]);     // R
+            data.push(rgba[idx]); // R
             data.push(rgba[idx + 3]); // A
         }
     }

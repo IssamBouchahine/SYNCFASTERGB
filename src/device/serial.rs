@@ -28,9 +28,14 @@ impl GapTimer {
         const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION: u32 = 0x0000_0002;
         const SYNCHRONIZE_AND_TIMER_MODIFY: u32 = 0x0010_0000 | 0x0002;
         unsafe {
-            CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, SYNCHRONIZE_AND_TIMER_MODIFY)
-                .ok()
-                .map(Self)
+            CreateWaitableTimerExW(
+                None,
+                PCWSTR::null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                SYNCHRONIZE_AND_TIMER_MODIFY,
+            )
+            .ok()
+            .map(Self)
         }
     }
 
@@ -106,19 +111,34 @@ impl DeviceConnection {
         let mut api = HidApi::new_without_enumerate()?;
         api.add_devices(VENDOR_ID, PRODUCT_ID)?;
 
-        let dev_info = api.device_list()
-            .find(|d| d.vendor_id() == VENDOR_ID && d.product_id() == PRODUCT_ID && d.interface_number() == 0)
-            .ok_or_else(|| format!("LED strip HID device not found (VID={:#06x}, PID={:#06x})",
-                VENDOR_ID, PRODUCT_ID))?;
+        let dev_info = api
+            .device_list()
+            .find(|d| {
+                d.vendor_id() == VENDOR_ID
+                    && d.product_id() == PRODUCT_ID
+                    && d.interface_number() == 0
+            })
+            .ok_or_else(|| {
+                format!(
+                    "LED strip HID device not found (VID={:#06x}, PID={:#06x})",
+                    VENDOR_ID, PRODUCT_ID
+                )
+            })?;
 
         let path = dev_info.path().to_owned();
         let device = api.open_path(&path)?;
         device.set_blocking_mode(false)?;
 
-        log::info!("HID device connected: VID={:#06x}, PID={:#06x} (interface 0)",
-            VENDOR_ID, PRODUCT_ID);
+        log::info!(
+            "HID device connected: VID={:#06x}, PID={:#06x} (interface 0)",
+            VENDOR_ID,
+            PRODUCT_ID
+        );
 
-        let conn = Self { device, mac: [0u8; 6] };
+        let conn = Self {
+            device,
+            mac: [0u8; 6],
+        };
         conn.drain_input();
         Ok(conn)
     }
@@ -129,12 +149,19 @@ impl DeviceConnection {
         let mut buf = [0u8; 256];
         let mut n_stale = 0u32;
         while let Ok(n) = self.device.read_timeout(&mut buf, 0) {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             n_stale += 1;
-            if n_stale >= 64 { break; }
+            if n_stale >= 64 {
+                break;
+            }
         }
         if n_stale > 0 {
-            log::warn!("discarded {} unread replies on connect (IN reports left by a previous session)", n_stale);
+            log::warn!(
+                "discarded {} unread replies on connect (IN reports left by a previous session)",
+                n_stale
+            );
         }
     }
 
@@ -150,16 +177,23 @@ impl DeviceConnection {
     /// Send a packet in 64-byte chunks, without waiting for a reply
     pub fn write_without_response(&self, packet: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         for (i, chunk) in protocol::chunk_packet(packet).iter().enumerate() {
-            if i > 0 { inter_chunk_pause(); }
+            if i > 0 {
+                inter_chunk_pause();
+            }
             self.hid_write(chunk)?;
         }
         Ok(())
     }
 
     /// Send a packet and wait for the reply (200 ms delay)
-    fn write_with_response(&self, packet: &[u8]) -> Result<Option<protocol::RbResponse>, Box<dyn std::error::Error>> {
+    fn write_with_response(
+        &self,
+        packet: &[u8],
+    ) -> Result<Option<protocol::RbResponse>, Box<dyn std::error::Error>> {
         for (i, chunk) in protocol::chunk_packet(packet).iter().enumerate() {
-            if i > 0 { inter_chunk_pause(); }
+            if i > 0 {
+                inter_chunk_pause();
+            }
             self.hid_write(chunk)?;
         }
 
@@ -185,9 +219,15 @@ impl DeviceConnection {
         let responded = match resp {
             Some(r) if r.payload.len() >= 7 => {
                 self.mac.copy_from_slice(&r.payload[1..7]);
-                log::info!("device MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                    self.mac[0], self.mac[1], self.mac[2],
-                    self.mac[3], self.mac[4], self.mac[5]);
+                log::info!(
+                    "device MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    self.mac[0],
+                    self.mac[1],
+                    self.mac[2],
+                    self.mac[3],
+                    self.mac[4],
+                    self.mac[5]
+                );
                 true
             }
             Some(_) => true,
@@ -222,14 +262,24 @@ impl DeviceConnection {
     // ── LED effects (dedicated action codes) ──
 
     /// Set LED effect (effectType: 2 = dynamic, 3 = sound reactive)
-    pub fn set_led_effect(&self, effect_type: u8, effect_index: u8) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn set_led_effect(
+        &self,
+        effect_type: u8,
+        effect_index: u8,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let packet = protocol::set_led_effect(effect_type, effect_index);
         self.write_with_response(&packet)?;
         Ok(())
     }
 
     /// Set a single LED color (setSectionLED)
-    pub fn set_section_led(&self, r: u8, g: u8, b: u8, lamps_amount: u32) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn set_section_led(
+        &self,
+        r: u8,
+        g: u8,
+        b: u8,
+        lamps_amount: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let packet = protocol::set_section_led(r, g, b, lamps_amount);
         self.write_without_response(&packet)
     }
@@ -241,7 +291,11 @@ impl DeviceConnection {
     }
 
     /// Send computer rhythm (effectIndex + volume 0-100), fast, without waiting for a reply
-    pub fn set_computer_rhythm(&self, effect_index: u8, volume: u8) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn set_computer_rhythm(
+        &self,
+        effect_index: u8,
+        volume: u8,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let packet = protocol::set_computer_rhythm(effect_index, volume);
         self.write_without_response(&packet)
     }

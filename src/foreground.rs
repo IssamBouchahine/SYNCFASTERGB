@@ -15,7 +15,10 @@ pub fn rect_covers(win: Rect4, mon: Rect4) -> bool {
 
 /// The desktop itself (wallpaper/shell) covers the whole monitor but is not an application.
 pub fn is_shell_class(class: &str) -> bool {
-    matches!(class, "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd")
+    matches!(
+        class,
+        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+    )
 }
 
 /// Windows' own full-screen detector (the one Focus Assist uses) reports these states for a
@@ -29,7 +32,11 @@ pub fn is_fullscreen_state(raw: i32) -> bool {
 
 fn system_says_fullscreen() -> bool {
     // SAFETY: a plain shell query with no arguments; failure maps to `false`.
-    unsafe { SHQueryUserNotificationState().map(|s| is_fullscreen_state(s.0)).unwrap_or(false) }
+    unsafe {
+        SHQueryUserNotificationState()
+            .map(|s| is_fullscreen_state(s.0))
+            .unwrap_or(false)
+    }
 }
 
 /// Is a real full-screen application focused on `monitor`?

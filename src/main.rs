@@ -3,13 +3,13 @@
 
 mod audio;
 mod capture;
-mod foreground;
-mod ipc;
-mod single;
 mod color;
 mod config;
 mod device;
+mod foreground;
 mod gui;
+mod ipc;
+mod single;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
@@ -33,8 +33,15 @@ use device::serial::DeviceConnection;
 
 fn main() {
     // --console flag: show a console even in release builds
-    if std::env::args().any(|a| matches!(a.as_str(), "--console" | "--list-monitors" | "--print-settings" | "--import-settings")) {
-        unsafe { attach_console(); }
+    if std::env::args().any(|a| {
+        matches!(
+            a.as_str(),
+            "--console" | "--list-monitors" | "--print-settings" | "--import-settings"
+        )
+    }) {
+        unsafe {
+            attach_console();
+        }
     }
 
     // `--print-settings` writes the settings as text; `--import-settings FILE` stores a settings
@@ -83,7 +90,11 @@ fn main() {
     // One tray app per session. Starting it again (taskbar, shortcut, autostart) just shows
     // the settings window of the running one. After a self-restart the old process may still
     // be shutting down, so wait for it.
-    let wait = if restart_count_from_args() > 0 { Duration::from_secs(10) } else { Duration::ZERO };
+    let wait = if restart_count_from_args() > 0 {
+        Duration::from_secs(10)
+    } else {
+        Duration::ZERO
+    };
     let _instance = match single::acquire_with_retry(single::APP_MUTEX, wait) {
         Some(g) => g,
         None => {
@@ -110,7 +121,12 @@ fn main() {
     let device_released = Arc::new(AtomicBool::new(false));
     let link_status = Arc::new(AtomicU8::new(LINK_SEARCHING));
 
-    spawn_shutdown_listener(running.clone(), monitor_off.clone(), suspend_pending.clone(), device_released.clone());
+    spawn_shutdown_listener(
+        running.clone(),
+        monitor_off.clone(),
+        suspend_pending.clone(),
+        device_released.clone(),
+    );
 
     let (tx, rx) = mpsc::sync_channel::<Vec<(u8, u8, u8)>>(2);
 
@@ -137,7 +153,19 @@ fn main() {
         let link_status = link_status.clone();
         std::thread::Builder::new()
             .name("sender".into())
-            .spawn(move || sender_loop(config, running, config_version, rx, monitor_off, screen_black, suspend_pending, device_released, link_status))
+            .spawn(move || {
+                sender_loop(
+                    config,
+                    running,
+                    config_version,
+                    rx,
+                    monitor_off,
+                    screen_black,
+                    suspend_pending,
+                    device_released,
+                    link_status,
+                )
+            })
             .expect("failed to start the sender thread")
     };
 
@@ -153,7 +181,8 @@ fn main() {
 /// Logging never touches the disk. With `--console` the log goes to that console; otherwise it
 /// is discarded (the program is a single exe and leaves no files behind).
 fn init_logging() {
-    let mut builder = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     builder.format_timestamp_millis();
     if !std::env::args().any(|a| a == "--console") {
         builder.target(env_logger::Target::Pipe(Box::new(std::io::sink())));
@@ -166,7 +195,7 @@ fn init_logging() {
 unsafe fn attach_console() {
     #[cfg(not(debug_assertions))]
     {
-        use windows::Win32::System::Console::{AttachConsole, AllocConsole, ATTACH_PARENT_PROCESS};
+        use windows::Win32::System::Console::{AllocConsole, AttachConsole, ATTACH_PARENT_PROCESS};
         if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
             let _ = AllocConsole();
         }
@@ -202,7 +231,10 @@ fn capture_loop(
             Ok(c) => break c,
             Err(e) => {
                 if !waiting_logged {
-                    log::warn!("screen capture not available yet ({}): retrying every 2 s", e);
+                    log::warn!(
+                        "screen capture not available yet ({}): retrying every 2 s",
+                        e
+                    );
                     waiting_logged = true;
                 }
                 for _ in 0..10 {
@@ -218,14 +250,24 @@ fn capture_loop(
 
     let mut extractor = ColorExtractor::new(config.device.lamps_amount, &config.sync);
 
-    log::info!("capture thread started ({} fps, {}x{})", config.capture.fps, first.width, first.height);
-    let mut mon_rect: Option<foreground::Rect4> = Some((first.origin.0, first.origin.1, first.origin.0 + first.width as i32, first.origin.1 + first.height as i32));
+    log::info!(
+        "capture thread started ({} fps, {}x{})",
+        config.capture.fps,
+        first.width,
+        first.height
+    );
+    let mut mon_rect: Option<foreground::Rect4> = Some((
+        first.origin.0,
+        first.origin.1,
+        first.origin.0 + first.width as i32,
+        first.origin.1 + first.height as i32,
+    ));
     let mut capturer: Option<ScreenCapture> = Some(first);
     let mut local_version = 0u32;
     // Counter of consecutive black frames (the flag is set after about a second)
     let mut black_frame_count = 0u32;
     let mut black_threshold_frames = config.capture.fps; // about 1 second
-    // Consecutive error counter (re-creates capture when it piles up)
+                                                         // Consecutive error counter (re-creates capture when it piles up)
     let mut consecutive_errors = 0u32;
     // Last send (lets smoothing settle on a still screen, and drives the keepalive)
     let mut last_sent: Option<Vec<(u8, u8, u8)>> = None;
@@ -263,7 +305,11 @@ fn capture_loop(
             let c = Config::load_or_default();
             base_interval = Duration::from_millis(1000 / c.capture.fps as u64);
             game_interval = Duration::from_millis(1000 / c.capture.game_fps.max(1) as u64);
-            frame_interval = if game_mode { base_interval.max(game_interval) } else { base_interval };
+            frame_interval = if game_mode {
+                base_interval.max(game_interval)
+            } else {
+                base_interval
+            };
             turn_off_on_black = c.app.turn_off_on_black;
             black_threshold_frames = c.capture.fps;
             extractor.update_config(c.device.lamps_amount, &c.sync);
@@ -297,7 +343,11 @@ fn capture_loop(
                 let now_game = foreground::fullscreen_app_covering(rect);
                 if now_game != game_mode {
                     game_mode = now_game;
-                    frame_interval = if game_mode { base_interval.max(game_interval) } else { base_interval };
+                    frame_interval = if game_mode {
+                        base_interval.max(game_interval)
+                    } else {
+                        base_interval
+                    };
                     log::info!(
                         "full-screen app {}: capturing at {} fps",
                         if game_mode { "focused" } else { "closed" },
@@ -328,7 +378,12 @@ fn capture_loop(
             match ScreenCapture::new(&capture_cfg) {
                 Ok(c) => {
                     log::info!("capture re-created ({}x{})", c.width, c.height);
-                    mon_rect = Some((c.origin.0, c.origin.1, c.origin.0 + c.width as i32, c.origin.1 + c.height as i32));
+                    mon_rect = Some((
+                        c.origin.0,
+                        c.origin.1,
+                        c.origin.0 + c.width as i32,
+                        c.origin.1 + c.height as i32,
+                    ));
                     capturer = Some(c);
                     frames_since_create = 0;
                     create_failures = 0;
@@ -337,21 +392,35 @@ fn capture_loop(
                     create_failures += 1;
                     dead_since.get_or_insert_with(Instant::now);
                     if create_failures == 1 || create_failures.is_multiple_of(60) {
-                        log::warn!("cannot re-create capture yet ({}); retrying (attempt {})", e, create_failures);
+                        log::warn!(
+                            "cannot re-create capture yet ({}); retrying (attempt {})",
+                            e,
+                            create_failures
+                        );
                     }
-                    if !game_mode && dead_since.is_some_and(|t| t.elapsed() >= WATCHDOG) && restarts < MAX_RESTARTS {
-                        log::error!("capture dead for {} s: restarting the app", WATCHDOG.as_secs());
+                    if !game_mode
+                        && dead_since.is_some_and(|t| t.elapsed() >= WATCHDOG)
+                        && restarts < MAX_RESTARTS
+                    {
+                        log::error!(
+                            "capture dead for {} s: restarting the app",
+                            WATCHDOG.as_secs()
+                        );
                         if relaunch_self(restarts) {
                             running.store(false, Ordering::SeqCst);
                             return;
                         }
                     }
-                    std::thread::sleep(Duration::from_millis(lost_backoff_ms(create_failures.min(3))));
+                    std::thread::sleep(Duration::from_millis(lost_backoff_ms(
+                        create_failures.min(3),
+                    )));
                     continue;
                 }
             }
         }
-        let Some(cap) = capturer.as_mut() else { continue };
+        let Some(cap) = capturer.as_mut() else {
+            continue;
+        };
 
         let t_cap = Instant::now();
         let cap_result = cap.capture_frame(frame_interval.as_millis().max(1) as u32);
@@ -366,8 +435,11 @@ fn capture_loop(
                 rapid_losses = 0;
                 dead_since = None;
                 if let Some(since) = access_lost_since.take() {
-                    log::info!("screen capture recovered after {} s ({} re-creations)",
-                        since.elapsed().as_secs(), access_lost_reinits);
+                    log::info!(
+                        "screen capture recovered after {} s ({} re-creations)",
+                        since.elapsed().as_secs(),
+                        access_lost_reinits
+                    );
                     access_lost_reinits = 0;
                 }
                 let t_ext = Instant::now();
@@ -375,16 +447,23 @@ fn capture_loop(
                 stat_ext += t_ext.elapsed();
                 if viewer_open {
                     if let Some(share) = frame_share.as_mut() {
-                        share.publish_bgra(&frame.data, frame.pitch as usize, frame.width as usize, frame.height as usize, extractor.bars(), extractor.effective_depth());
+                        share.publish_bgra(
+                            &frame.data,
+                            frame.pitch as usize,
+                            frame.width as usize,
+                            frame.height as usize,
+                            extractor.bars(),
+                            extractor.effective_depth(),
+                        );
                     }
                 }
 
                 // Black screen detection: are all LED colors nearly black?
                 const BLACK_SUM_THRESHOLD: u16 = 15;
                 if turn_off_on_black {
-                    let is_black = colors.iter().all(|&(r, g, b)| {
-                        (r as u16 + g as u16 + b as u16) < BLACK_SUM_THRESHOLD
-                    });
+                    let is_black = colors
+                        .iter()
+                        .all(|&(r, g, b)| (r as u16 + g as u16 + b as u16) < BLACK_SUM_THRESHOLD);
                     if is_black {
                         black_frame_count = black_frame_count.saturating_add(1);
                     } else {
@@ -418,7 +497,7 @@ fn capture_loop(
             }
             Err(CaptureError::Timeout) => {
                 dead_since = None; // a timeout just means the screen is static
-                // Static screen: keep smoothing converging, and send a keepalive.
+                                   // Static screen: keep smoothing converging, and send a keepalive.
                 if let Some(f) = cap.last_frame() {
                     let colors = extractor.extract(&f.data, f.pitch, f.width, f.height);
                     if last_sent.as_ref() != Some(&colors) || last_send_at.elapsed() >= KEEPALIVE {
@@ -438,7 +517,10 @@ fn capture_loop(
                 if frames_since_create == 0 {
                     rapid_losses += 1;
                     if rapid_losses == 1 || rapid_losses.is_multiple_of(30) {
-                        log::warn!("capture lost again right after re-creation ({} times)", rapid_losses);
+                        log::warn!(
+                            "capture lost again right after re-creation ({} times)",
+                            rapid_losses
+                        );
                     }
                 } else {
                     rapid_losses = 0;
@@ -446,10 +528,15 @@ fn capture_loop(
                 // Drop every GPU object BEFORE building new ones.
                 capturer = None;
                 std::thread::sleep(Duration::from_millis(lost_backoff_ms(rapid_losses)));
-                if !game_mode && dead_since.is_some_and(|t| t.elapsed() >= WATCHDOG) && restarts < MAX_RESTARTS
+                if !game_mode
+                    && dead_since.is_some_and(|t| t.elapsed() >= WATCHDOG)
+                    && restarts < MAX_RESTARTS
                     && capture::dxgi::attach_input_desktop()
                 {
-                    log::error!("capture dead for {} s: restarting the app", WATCHDOG.as_secs());
+                    log::error!(
+                        "capture dead for {} s: restarting the app",
+                        WATCHDOG.as_secs()
+                    );
                     if relaunch_self(restarts) {
                         running.store(false, Ordering::SeqCst);
                         return;
@@ -462,7 +549,10 @@ fn capture_loop(
                     log::error!("capture error: {} ({} in a row)", e, consecutive_errors);
                 }
                 if consecutive_errors >= 30 {
-                    log::warn!("{} capture errors in a row: re-creating capture", consecutive_errors);
+                    log::warn!(
+                        "{} capture errors in a row: re-creating capture",
+                        consecutive_errors
+                    );
                     consecutive_errors = 0;
                     capturer = None;
                 }
@@ -494,7 +584,9 @@ fn capture_loop(
 
 /// Run the engine below normal priority: a game's threads always win any CPU contention.
 fn lower_process_priority() {
-    use windows::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS};
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
+    };
     // SAFETY: the pseudo-handle from GetCurrentProcess is always valid for this process.
     unsafe {
         let _ = SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
@@ -532,7 +624,10 @@ fn relaunch_self(restarts: u32) -> bool {
 
 fn restart_count_from_args() -> u32 {
     std::env::args()
-        .find_map(|a| a.strip_prefix("--restart-count=").and_then(|v| v.parse().ok()))
+        .find_map(|a| {
+            a.strip_prefix("--restart-count=")
+                .and_then(|v| v.parse().ok())
+        })
         .unwrap_or(0)
 }
 
@@ -591,7 +686,10 @@ fn handle_write_failure(
     match classify_error(e) {
         WriteFailure::Hung => {
             if *link != LinkState::Hung {
-                log::error!("strip firmware stopped accepting data ({}): unplug and replug the strip", e);
+                log::error!(
+                    "strip firmware stopped accepting data ({}): unplug and replug the strip",
+                    e
+                );
             }
             *link = LinkState::Hung;
             *next_connect_at = Instant::now() + Duration::from_secs(5);
@@ -668,7 +766,9 @@ fn sender_loop(
         // So that it stops "off" even if it hangs during the transition, always turn it off first.
         if suspend_pending.load(Ordering::SeqCst) {
             if let Some(c) = conn.take() {
-                log::info!("sleep/shutdown transition: turning the LEDs off and releasing the HID handle");
+                log::info!(
+                    "sleep/shutdown transition: turning the LEDs off and releasing the HID handle"
+                );
                 if let Err(e) = c.turn_off() {
                     log::warn!("could not turn the LEDs off before the transition: {}", e);
                 }
@@ -693,7 +793,10 @@ fn sender_loop(
             match DeviceConnection::connect(&config.device.com_port) {
                 Ok(mut c) => {
                     let responded = c.init_device().unwrap_or(false);
-                    if let Err(e) = c.set_brightness(firmware_brightness(&current_mode, brightness)) { log::warn!("setting brightness failed: {}", e); }
+                    if let Err(e) = c.set_brightness(firmware_brightness(&current_mode, brightness))
+                    {
+                        log::warn!("setting brightness failed: {}", e);
+                    }
                     if responded {
                         log::info!("strip connected (MAC={:02x?})", c.mac);
                         link = LinkState::Up;
@@ -717,7 +820,10 @@ fn sender_loop(
                         link = LinkState::Absent;
                         static ABSENT_LOGGED: AtomicBool = AtomicBool::new(false);
                         if !ABSENT_LOGGED.swap(true, Ordering::Relaxed) {
-                            log::warn!("no strip found yet ({}): checking every second, quietly", e);
+                            log::warn!(
+                                "no strip found yet ({}): checking every second, quietly",
+                                e
+                            );
                         }
                     }
                     next_connect_at = Instant::now() + Duration::from_secs(1);
@@ -773,7 +879,12 @@ fn sender_loop(
                 log::info!("screen off detected: turning the LEDs off");
                 if let Some(d) = conn.as_ref() {
                     if let Err(e) = d.turn_off() {
-                        handle_write_failure(e.as_ref(), &mut conn, &mut link, &mut next_connect_at);
+                        handle_write_failure(
+                            e.as_ref(),
+                            &mut conn,
+                            &mut link,
+                            &mut next_connect_at,
+                        );
                         continue;
                     }
                 }
@@ -828,14 +939,22 @@ fn sender_loop(
                     }
 
                     if send_count == 0 {
-                        log::info!("first SC packet: {} LEDs, {} bytes", color_data.len() / 5, color_data.len());
+                        log::info!(
+                            "first SC packet: {} LEDs, {} bytes",
+                            color_data.len() / 5,
+                            color_data.len()
+                        );
                     }
                     send_count += 1;
 
                     if let Err(e) = d.set_sync_screen(&color_data) {
-                        if device::serial::classify_error(e.as_ref()) == device::serial::WriteFailure::Gone && last_draw > 0.3 {
+                        if device::serial::classify_error(e.as_ref())
+                            == device::serial::WriteFailure::Gone
+                            && last_draw > 0.3
+                        {
                             let now = Instant::now();
-                            gone_events.retain(|t| now.duration_since(*t) < Duration::from_secs(120));
+                            gone_events
+                                .retain(|t| now.duration_since(*t) < Duration::from_secs(120));
                             gone_events.push(now);
                             if gone_events.len() >= 2 && derate > 0.3 {
                                 derate = (derate * 0.75).max(0.3);
@@ -847,14 +966,21 @@ fn sender_loop(
                                 );
                             }
                         }
-                        handle_write_failure(e.as_ref(), &mut conn, &mut link, &mut next_connect_at);
+                        handle_write_failure(
+                            e.as_ref(),
+                            &mut conn,
+                            &mut link,
+                            &mut next_connect_at,
+                        );
                         continue;
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
-        } else if current_mode == LedMode::Sound && effect_cfg.rhythm_source == RhythmSource::Computer {
+        } else if current_mode == LedMode::Sound
+            && effect_cfg.rhythm_source == RhythmSource::Computer
+        {
             // Computer rhythm: audio volume, sent repeatedly with setComputerRhythm
             if audio_meter.is_none() {
                 audio_meter = audio::AudioMeter::new().ok();
@@ -988,9 +1114,7 @@ fn apply_mode(conn: &DeviceConnection, effect: &config::EffectConfig, lamps_amou
             // Send a single color with setSectionLED
             conn.set_section_led(effect.color_r, effect.color_g, effect.color_b, lamps_amount)
         }
-        LedMode::Off => {
-            conn.turn_off()
-        }
+        LedMode::Off => conn.turn_off(),
     };
     match result {
         Ok(()) => true,
@@ -1003,11 +1127,19 @@ fn apply_mode(conn: &DeviceConnection, effect: &config::EffectConfig, lamps_amou
 
 /// Firmware brightness: full in Sync mode (software scaling handles it), user level otherwise.
 fn firmware_brightness(mode: &LedMode, brightness: u8) -> u8 {
-    if *mode == LedMode::Sync { 255 } else { brightness }
+    if *mode == LedMode::Sync {
+        255
+    } else {
+        brightness
+    }
 }
 
 fn power_from_config(sync: &config::SyncConfig) -> Option<f32> {
-    if sync.light_compression { Some(sync.power_limit_pct as f32 / 100.0) } else { None }
+    if sync.light_compression {
+        Some(sync.power_limit_pct as f32 / 100.0)
+    } else {
+        None
+    }
 }
 
 /// Effective whole-strip budget: the configured one, further reduced by the brownout guard.
@@ -1060,7 +1192,9 @@ static RELEASED_FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
 /// Ask the sender to turn the LEDs off and release the handle, then wait for it (or the deadline).
 fn request_device_release(reason: &str, max_wait: Duration) {
-    let (Some(suspend), Some(released)) = (SUSPEND_FLAG.get(), RELEASED_FLAG.get()) else { return; };
+    let (Some(suspend), Some(released)) = (SUSPEND_FLAG.get(), RELEASED_FLAG.get()) else {
+        return;
+    };
     log::info!("{}: requesting LED off", reason);
     suspend.store(true, Ordering::SeqCst);
     let start = Instant::now();
@@ -1068,9 +1202,17 @@ fn request_device_release(reason: &str, max_wait: Duration) {
         std::thread::sleep(Duration::from_millis(20));
     }
     if released.load(Ordering::SeqCst) {
-        log::info!("{}: LED off done ({} ms)", reason, start.elapsed().as_millis());
+        log::info!(
+            "{}: LED off done ({} ms)",
+            reason,
+            start.elapsed().as_millis()
+        );
     } else {
-        log::warn!("{}: LED off not completed (deadline of {} ms exceeded)", reason, max_wait.as_millis());
+        log::warn!(
+            "{}: LED off not completed (deadline of {} ms exceeded)",
+            reason,
+            max_wait.as_millis()
+        );
     }
 }
 
@@ -1095,12 +1237,12 @@ fn spawn_shutdown_listener(
     std::thread::Builder::new()
         .name("shutdown".into())
         .spawn(|| unsafe {
-            use windows::Win32::UI::WindowsAndMessaging::*;
             use windows::Win32::System::Power::RegisterPowerSettingNotification;
             use windows::Win32::System::Threading::SetProcessShutdownParameters;
+            use windows::Win32::UI::WindowsAndMessaging::*;
             const SHUTDOWN_NORETRY: u32 = 0x0001; // winbase.h
-            use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
             use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
 
             // Receive the shutdown notice before other apps to get time to turn the LEDs off (0x3FF = highest priority)
             let _ = SetProcessShutdownParameters(0x3FF, SHUTDOWN_NORETRY);
@@ -1115,16 +1257,25 @@ fn spawn_shutdown_listener(
 
             // Hidden top-level window (receives WM_ENDSESSION and power notifications)
             let hwnd = CreateWindowExW(
-                WINDOW_EX_STYLE(0), class_name,
-                windows::core::w!(""), WINDOW_STYLE(0),
-                0, 0, 0, 0,
-                None, None, None, None,
+                WINDOW_EX_STYLE(0),
+                class_name,
+                windows::core::w!(""),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
             );
 
             // Register for monitor power state changes
             if let Ok(hwnd) = hwnd {
                 let _ = RegisterPowerSettingNotification(
-                    HANDLE(hwnd.0 as _), &GUID_CONSOLE_DISPLAY_STATE,
+                    HANDLE(hwnd.0 as _),
+                    &GUID_CONSOLE_DISPLAY_STATE,
                     REGISTER_NOTIFICATION_FLAGS(0),
                 );
             }
@@ -1138,7 +1289,10 @@ fn spawn_shutdown_listener(
 }
 
 unsafe extern "system" fn shutdown_wnd_proc(
-    hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
 ) -> LRESULT {
     use windows::Win32::UI::WindowsAndMessaging::*;
     // WM_POWERBROADCAST wParam (winuser.h)
@@ -1184,9 +1338,14 @@ unsafe extern "system" fn shutdown_wnd_proc(
                         if let Some(flag) = MONITOR_OFF_FLAG.get() {
                             // 0 = off, 1 = on, 2 = dimmed
                             flag.store(state == 0, Ordering::SeqCst);
-                            log::info!("monitor power state: {}", match state {
-                                0 => "off", 1 => "on", _ => "dimmed"
-                            });
+                            log::info!(
+                                "monitor power state: {}",
+                                match state {
+                                    0 => "off",
+                                    1 => "on",
+                                    _ => "dimmed",
+                                }
+                            );
                         }
                     }
                 }
@@ -1198,14 +1357,27 @@ unsafe extern "system" fn shutdown_wnd_proc(
     }
 }
 
-fn run_tray(running: Arc<AtomicBool>, active: Arc<AtomicBool>, config_version: Arc<AtomicU32>, locale: &'static gui::Locale, link_status: Arc<AtomicU8>) {
+fn run_tray(
+    running: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
+    config_version: Arc<AtomicU32>,
+    locale: &'static gui::Locale,
+    link_status: Arc<AtomicU8>,
+) {
     let event_loop = EventLoop::new().expect("failed to create the event loop");
     let mut app = TrayApp {
-        running, active, config_version,
-        last_revision: Config::revision(), tick_counter: 0,
-        tray: None, toggle_item: None, settings_item: None, quit_item: None,
+        running,
+        active,
+        config_version,
+        last_revision: Config::revision(),
+        tick_counter: 0,
+        tray: None,
+        toggle_item: None,
+        settings_item: None,
+        quit_item: None,
         locale,
-        link_status, last_link: u8::MAX,
+        link_status,
+        last_link: u8::MAX,
     };
     event_loop.run_app(&mut app).ok();
 }
@@ -1227,7 +1399,9 @@ struct TrayApp {
 
 impl ApplicationHandler for TrayApp {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
-        if self.tray.is_some() { return; }
+        if self.tray.is_some() {
+            return;
+        }
 
         let menu = Menu::new();
         let toggle = MenuItem::new(self.locale.tray_pause, true, None);
@@ -1278,7 +1452,9 @@ impl ApplicationHandler for TrayApp {
                 }
             }
             if let Some(ref s) = self.settings_item {
-                if event.id() == s.id() { gui::open_settings(); }
+                if event.id() == s.id() {
+                    gui::open_settings();
+                }
             }
             if let Some(ref q) = self.quit_item {
                 if event.id() == q.id() {
@@ -1291,8 +1467,15 @@ impl ApplicationHandler for TrayApp {
         // Left click / double click on the tray icon opens (or focuses) the settings window.
         while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
             match ev {
-                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }
-                | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => gui::open_settings(),
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+                | TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                } => gui::open_settings(),
                 _ => {}
             }
         }
@@ -1304,7 +1487,10 @@ impl ApplicationHandler for TrayApp {
             if let Some(ref tray) = self.tray {
                 let (icon, tip) = match link {
                     LINK_UP => (create_rgb_tray_icon(), "SYNCFASTERGB: strip connected"),
-                    LINK_HUNG => (create_gray_tray_icon(), "SYNCFASTERGB: strip not responding, unplug and replug it"),
+                    LINK_HUNG => (
+                        create_gray_tray_icon(),
+                        "SYNCFASTERGB: strip not responding, unplug and replug it",
+                    ),
                     _ => (create_gray_tray_icon(), "SYNCFASTERGB: searching for strip"),
                 };
                 tray.set_icon(Some(icon)).ok();
@@ -1340,6 +1526,8 @@ impl ApplicationHandler for TrayApp {
         }
 
         // Wake ~10x/s instead of busy-looping (menu clicks still respond within 100 ms).
-        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100)));
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(100),
+        ));
     }
 }

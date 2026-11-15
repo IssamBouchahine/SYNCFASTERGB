@@ -15,7 +15,11 @@ pub fn attach_input_desktop() -> bool {
     };
     const GENERIC_ALL: u32 = 0x1000_0000;
     unsafe {
-        match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_ACCESS_FLAGS(GENERIC_ALL)) {
+        match OpenInputDesktop(
+            DESKTOP_CONTROL_FLAGS(0),
+            false,
+            DESKTOP_ACCESS_FLAGS(GENERIC_ALL),
+        ) {
             // The handle must stay open while the thread uses the desktop; it is a few
             // bytes and only re-opened after a desktop switch.
             Ok(h) => SetThreadDesktop(h).is_ok(),
@@ -92,7 +96,11 @@ impl ScreenCapture {
             let m = monitors::select(&monitors, cfg.monitor, &cfg.monitor_name)
                 .ok_or("requested monitor not found (run with --list-monitors)")?;
             if !m.attached {
-                return Err(format!("monitor [{}] {} is not attached to the desktop", m.global_index, m.device_name).into());
+                return Err(format!(
+                    "monitor [{}] {} is not attached to the desktop",
+                    m.global_index, m.device_name
+                )
+                .into());
             }
 
             let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
@@ -130,7 +138,11 @@ impl ScreenCapture {
 
             log::info!(
                 "capture init: {}x{} on [{}] {} / {}",
-                width, height, m.global_index, m.adapter_name, m.device_name
+                width,
+                height,
+                m.global_index,
+                m.adapter_name,
+                m.device_name
             );
 
             Ok(Self {
@@ -161,7 +173,10 @@ impl ScreenCapture {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource = None;
 
-            if let Err(e) = self.duplication.AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource) {
+            if let Err(e) =
+                self.duplication
+                    .AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource)
+            {
                 let code = e.code();
                 if code == DXGI_ERROR_WAIT_TIMEOUT {
                     return Err(CaptureError::Timeout);
@@ -169,7 +184,10 @@ impl ScreenCapture {
                 if code == DXGI_ERROR_ACCESS_LOST {
                     return Err(CaptureError::AccessLost);
                 }
-                return Err(CaptureError::Other(format!("AcquireNextFrame failed: {}", e)));
+                return Err(CaptureError::Other(format!(
+                    "AcquireNextFrame failed: {}",
+                    e
+                )));
             }
 
             // From here on every path must ReleaseFrame.
@@ -192,25 +210,36 @@ impl ScreenCapture {
         }
 
         let resource = resource.ok_or_else(|| CaptureError::Other("no resource".into()))?;
-        let texture: ID3D11Texture2D = resource.cast().map_err(|e| CaptureError::Other(format!("{e}")))?;
+        let texture: ID3D11Texture2D = resource
+            .cast()
+            .map_err(|e| CaptureError::Other(format!("{e}")))?;
 
         let mut tdesc = D3D11_TEXTURE2D_DESC::default();
         texture.GetDesc(&mut tdesc);
         let hdr = tdesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
         if !hdr && tdesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
-            return Err(CaptureError::Other(format!("unsupported desktop format {:?}", tdesc.Format)));
+            return Err(CaptureError::Other(format!(
+                "unsupported desktop format {:?}",
+                tdesc.Format
+            )));
         }
 
         // Lazily create GPU resources for the real desktop format; if the format changed
         // (HDR toggled) rebuild them.
-        if self.gpu_wanted && (self.gpu.is_none() && !self.gpu_tried || self.gpu.as_ref().is_some_and(|g| g.hdr != hdr)) {
+        if self.gpu_wanted
+            && (self.gpu.is_none() && !self.gpu_tried
+                || self.gpu.as_ref().is_some_and(|g| g.hdr != hdr))
+        {
             self.gpu_tried = true;
             let device = self._device.clone();
             match create_gpu_downscale(&device, self.width, self.height, hdr) {
                 Ok(g) => {
                     log::info!(
                         "GPU downscale active ({}): mip level {} -> {}x{} readback",
-                        if hdr { "HDR FP16" } else { "SDR" }, g.level, g.small_w, g.small_h
+                        if hdr { "HDR FP16" } else { "SDR" },
+                        g.level,
+                        g.small_w,
+                        g.small_h
                     );
                     self.gpu = Some(g);
                 }
@@ -227,7 +256,16 @@ impl ScreenCapture {
             ctx.GenerateMips(&gpu.srv);
             // Queue this frame's readback ...
             let submitted = gpu.write_idx;
-            ctx.CopySubresourceRegion(&gpu.staging[submitted], 0, 0, 0, 0, &gpu.mip_tex, gpu.level, None);
+            ctx.CopySubresourceRegion(
+                &gpu.staging[submitted],
+                0,
+                0,
+                0,
+                0,
+                &gpu.mip_tex,
+                gpu.level,
+                None,
+            );
             gpu.write_idx ^= 1;
             // Commands are batched until flushed: without this the copy may sit in the queue
             // and the "is it ready?" check below would never succeed.
@@ -243,7 +281,14 @@ impl ScreenCapture {
             };
             gpu.pending = true;
             let got = if gpu.hdr {
-                read_back_hdr(ctx, &gpu.staging[read_idx], gpu.small_w, gpu.small_h, self.sdr_white_scale, wait)?
+                read_back_hdr(
+                    ctx,
+                    &gpu.staging[read_idx],
+                    gpu.small_w,
+                    gpu.small_h,
+                    self.sdr_white_scale,
+                    wait,
+                )?
             } else {
                 read_back(ctx, &gpu.staging[read_idx], gpu.small_w, gpu.small_h, wait)?
             };
@@ -269,8 +314,13 @@ impl ScreenCapture {
             }
             if self.full_staging.is_none() {
                 self.full_staging = Some(
-                    create_staging(&self._device, self.width, self.height, DXGI_FORMAT_B8G8R8A8_UNORM)
-                        .map_err(|e| CaptureError::Other(format!("{e}")))?,
+                    create_staging(
+                        &self._device,
+                        self.width,
+                        self.height,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                    )
+                    .map_err(|e| CaptureError::Other(format!("{e}")))?,
                 );
             }
             let staging = self.full_staging.as_ref().unwrap();
@@ -291,7 +341,11 @@ unsafe fn map_read(
     staging: &ID3D11Texture2D,
     wait: bool,
 ) -> Result<Option<D3D11_MAPPED_SUBRESOURCE>, CaptureError> {
-    let flags = if wait { 0 } else { D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32 };
+    let flags = if wait {
+        0
+    } else {
+        D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32
+    };
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
     match context.Map(staging, 0, D3D11_MAP_READ, flags, Some(&mut mapped)) {
         Ok(()) => Ok(Some(mapped)),
@@ -314,7 +368,12 @@ unsafe fn read_back(
     let size = (pitch as usize) * (height as usize);
     let data = std::slice::from_raw_parts(mapped.pData as *const u8, size).to_vec();
     context.Unmap(staging, 0);
-    Ok(Some(Frame { data, pitch, width, height }))
+    Ok(Some(Frame {
+        data,
+        pitch,
+        width,
+        height,
+    }))
 }
 
 /// IEEE half -> f32.
@@ -325,7 +384,11 @@ pub fn f16_to_f32(h: u16) -> f32 {
     match exp {
         0 => sign * man * 2f32.powi(-24),
         31 => {
-            if man == 0.0 { sign * f32::INFINITY } else { f32::NAN }
+            if man == 0.0 {
+                sign * f32::INFINITY
+            } else {
+                f32::NAN
+            }
         }
         _ => sign * (1.0 + man / 1024.0) * 2f32.powi(exp - 15),
     }
@@ -337,7 +400,11 @@ pub fn hdr_to_srgb8(v: f32, white_scale: f32) -> u8 {
         return 0;
     }
     let x = (v / white_scale.max(0.1)).clamp(0.0, 1.0);
-    let e = if x <= 0.003_130_8 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 };
+    let e = if x <= 0.003_130_8 {
+        12.92 * x
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    };
     (e * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
@@ -359,7 +426,8 @@ unsafe fn read_back_hdr(
     for y in 0..height as usize {
         for x in 0..width as usize {
             let o = y * src_pitch + x * 8;
-            let ch = |i: usize| f16_to_f32(u16::from_le_bytes([src[o + i * 2], src[o + i * 2 + 1]]));
+            let ch =
+                |i: usize| f16_to_f32(u16::from_le_bytes([src[o + i * 2], src[o + i * 2 + 1]]));
             let d = y * out_pitch + x * 4;
             data[d] = hdr_to_srgb8(ch(2), white_scale); // B
             data[d + 1] = hdr_to_srgb8(ch(1), white_scale); // G
@@ -367,7 +435,12 @@ unsafe fn read_back_hdr(
         }
     }
     context.Unmap(staging, 0);
-    Ok(Some(Frame { data, pitch: out_pitch as u32, width, height }))
+    Ok(Some(Frame {
+        data,
+        pitch: out_pitch as u32,
+        width,
+        height,
+    }))
 }
 
 unsafe fn create_gpu_downscale(
@@ -379,9 +452,17 @@ unsafe fn create_gpu_downscale(
     // SDR: TYPELESS storage viewed as sRGB so GenerateMips averages in linear light.
     // HDR: FP16 scRGB is already linear.
     let (tex_fmt, view_fmt, stage_fmt) = if hdr {
-        (DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT)
+        (
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+        )
     } else {
-        (DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM)
+        (
+            DXGI_FORMAT_B8G8R8A8_TYPELESS,
+            DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+        )
     };
     let level = mip_level_for(width);
     let small_w = (width >> level).max(1);
@@ -393,7 +474,10 @@ unsafe fn create_gpu_downscale(
         MipLevels: level + 1,
         ArraySize: 1,
         Format: tex_fmt,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         Usage: D3D11_USAGE_DEFAULT,
         BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
         CPUAccessFlags: 0,
@@ -407,7 +491,10 @@ unsafe fn create_gpu_downscale(
         Format: view_fmt,
         ViewDimension: D3D_SRV_DIMENSION_TEXTURE2D,
         Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
-            Texture2D: D3D11_TEX2D_SRV { MostDetailedMip: 0, MipLevels: level + 1 },
+            Texture2D: D3D11_TEX2D_SRV {
+                MostDetailedMip: 0,
+                MipLevels: level + 1,
+            },
         },
     };
     let mut srv = None;
@@ -419,7 +506,18 @@ unsafe fn create_gpu_downscale(
         create_staging(device, small_w, small_h, stage_fmt)?,
     ];
 
-    Ok(GpuDownscale { mip_tex, srv, level, small_w, small_h, staging, write_idx: 0, pending: false, stall: 0, hdr })
+    Ok(GpuDownscale {
+        mip_tex,
+        srv,
+        level,
+        small_w,
+        small_h,
+        staging,
+        write_idx: 0,
+        pending: false,
+        stall: 0,
+        hdr,
+    })
 }
 
 unsafe fn create_staging(
@@ -434,7 +532,10 @@ unsafe fn create_staging(
         MipLevels: 1,
         ArraySize: 1,
         Format: format,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         Usage: D3D11_USAGE_STAGING,
         BindFlags: 0,
         CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,

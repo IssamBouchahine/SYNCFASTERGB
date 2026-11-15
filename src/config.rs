@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[derive(Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct Config {
     #[serde(default)]
     pub device: DeviceConfig,
@@ -99,7 +98,6 @@ pub enum LedMode {
     Off,
 }
 
-
 /// Sound-reactive source
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -109,7 +107,6 @@ pub enum RhythmSource {
     Controller,
     Computer,
 }
-
 
 /// UI language
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -122,7 +119,6 @@ pub enum Language {
     Ko,
 }
 
-
 /// Software dynamic effect (single color)
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -133,7 +129,6 @@ pub enum SoftEffect {
     Breathe,
     Rotate,
 }
-
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EffectConfig {
@@ -199,21 +194,45 @@ impl Default for AppConfig {
     }
 }
 
-fn default_gamma() -> f32 { 1.0 }
-fn default_saturation() -> f32 { 2.0 }
-fn default_attack_ms() -> f32 { 40.0 }
-fn default_decay_ms() -> f32 { 250.0 }
-fn default_deadband() -> f32 { 2.0 }
+fn default_gamma() -> f32 {
+    1.0
+}
+fn default_saturation() -> f32 {
+    2.0
+}
+fn default_attack_ms() -> f32 {
+    40.0
+}
+fn default_decay_ms() -> f32 {
+    250.0
+}
+fn default_deadband() -> f32 {
+    2.0
+}
 /// Highest power budget the app will ever apply (percent of all-LEDs-white).
 pub const MAX_POWER_LIMIT_PCT: u8 = 80;
 
-fn default_power_limit_pct() -> u8 { 40 }
-fn default_edge_depth_pct() -> u8 { 15 }
-fn default_black_level() -> u8 { 26 }
-fn default_true() -> bool { true }
-fn default_edge_number() -> u8 { 3 }
-fn default_255() -> u8 { 255 }
-fn default_50() -> u8 { 50 }
+fn default_power_limit_pct() -> u8 {
+    40
+}
+fn default_edge_depth_pct() -> u8 {
+    15
+}
+fn default_black_level() -> u8 {
+    26
+}
+fn default_true() -> bool {
+    true
+}
+fn default_edge_number() -> u8 {
+    3
+}
+fn default_255() -> u8 {
+    255
+}
+fn default_50() -> u8 {
+    50
+}
 
 /// Where the settings live. A registry value instead of a file keeps the whole program a
 /// single exe: no config file, no log file, nothing next to it.
@@ -248,7 +267,11 @@ impl Config {
     /// Clamp every value into a range the rest of the program can safely use.
     pub fn sanitize(&mut self) {
         fn f(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
-            if v.is_nan() { default } else { v.clamp(lo, hi) }
+            if v.is_nan() {
+                default
+            } else {
+                v.clamp(lo, hi)
+            }
         }
         // LED index is a single byte on the wire
         self.device.lamps_amount = self.device.lamps_amount.clamp(1, 255);
@@ -284,7 +307,9 @@ impl Config {
     pub fn load_from_key(key_path: &str) -> Option<Self> {
         use winreg::enums::HKEY_CURRENT_USER;
         use winreg::RegKey;
-        let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey(key_path).ok()?;
+        let key = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(key_path)
+            .ok()?;
         let text: String = key.get_value(VALUE_SETTINGS).ok()?;
         match Self::from_toml(&text) {
             Ok(c) => Some(c),
@@ -306,7 +331,10 @@ impl Config {
         use winreg::RegKey;
         let text = self.to_toml()?;
         let (key, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(key_path)?;
-        if key.get_value::<String, _>(VALUE_SETTINGS).is_ok_and(|old| old == text) {
+        if key
+            .get_value::<String, _>(VALUE_SETTINGS)
+            .is_ok_and(|old| old == text)
+        {
             return Ok(());
         }
         key.set_value(VALUE_SETTINGS, &text)?;
@@ -349,13 +377,26 @@ impl Config {
 
 impl Default for DeviceConfig {
     fn default() -> Self {
-        Self { com_port: "auto".into(), wire_map: "RGB".into(), display_size: 27, lamps_amount: 65 }
+        Self {
+            com_port: "auto".into(),
+            wire_map: "RGB".into(),
+            display_size: 27,
+            lamps_amount: 65,
+        }
     }
 }
 
 impl Default for CaptureConfig {
     fn default() -> Self {
-        Self { fps: 60, game_fps: 30, monitor: 0, monitor_name: String::new(), sample_width: 50, gpu_downscale: true, hdr_sdr_white_nits: 240.0 }
+        Self {
+            fps: 60,
+            game_fps: 30,
+            monitor: 0,
+            monitor_name: String::new(),
+            sample_width: 50,
+            gpu_downscale: true,
+            hdr_sdr_white_nits: 240.0,
+        }
     }
 }
 
@@ -385,7 +426,8 @@ impl Default for SyncConfig {
 // ── Autostart (registry) ──
 
 const REG_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const REG_APPROVED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+const REG_APPROVED_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
 const REG_VALUE_NAME: &str = "SYNCFASTERGB";
 
 pub fn set_autostart(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -426,10 +468,13 @@ pub fn is_autostart_enabled() -> bool {
     use winreg::RegKey;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let has_run = hkcu.open_subkey(REG_RUN_KEY)
+    let has_run = hkcu
+        .open_subkey(REG_RUN_KEY)
         .and_then(|key| key.get_value::<String, _>(REG_VALUE_NAME))
         .is_ok();
-    if !has_run { return false; }
+    if !has_run {
+        return false;
+    }
 
     // Check whether it was disabled (0x01) in StartupApproved
     if let Ok(approved) = hkcu.open_subkey(REG_APPROVED_KEY) {
@@ -441,7 +486,6 @@ pub fn is_autostart_enabled() -> bool {
     }
     true
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -461,11 +505,13 @@ mod tests {
 
     #[test]
     fn detection_settings_are_clamped() {
-        let mut c: Config = toml::from_str("[sync]\nedge_depth_pct = 0\nblack_level = 255").unwrap();
+        let mut c: Config =
+            toml::from_str("[sync]\nedge_depth_pct = 0\nblack_level = 255").unwrap();
         c.sanitize();
         assert_eq!(c.sync.edge_depth_pct, 3);
         assert_eq!(c.sync.black_level, 80);
-        let mut c: Config = toml::from_str("[sync]\nedge_depth_pct = 200\nblack_level = 0").unwrap();
+        let mut c: Config =
+            toml::from_str("[sync]\nedge_depth_pct = 200\nblack_level = 0").unwrap();
         c.sanitize();
         assert_eq!(c.sync.edge_depth_pct, 40);
         assert_eq!(c.sync.black_level, 2);
@@ -536,21 +582,24 @@ mod tests {
         let key = r"Software\SYNCFASTERGB_Test_corrupt";
         let hk = winreg::RegKey::predef(HKEY_CURRENT_USER);
         let (k, _) = hk.create_subkey(key).unwrap();
-        k.set_value("Settings", &"this is [not valid toml".to_string()).unwrap();
+        k.set_value("Settings", &"this is [not valid toml".to_string())
+            .unwrap();
         assert!(Config::load_from_key(key).is_none());
         let _ = hk.delete_subkey_all(key);
     }
 
     #[test]
     fn partial_config_is_accepted() {
-        let c: Config = toml::from_str("[device]
+        let c: Config = toml::from_str(
+            "[device]
 lamps_amount = 71
 [capture]
-monitor_name = \"dp\"").unwrap();
+monitor_name = \"dp\"",
+        )
+        .unwrap();
         assert_eq!(c.device.lamps_amount, 71);
         assert_eq!(c.device.display_size, 27);
         assert_eq!(c.capture.monitor_name, "dp");
         assert_eq!(c.capture.sample_width, 50);
     }
 }
-

@@ -11,14 +11,14 @@ const MAX_CHUNK_SIZE: usize = 64;
 
 /// Action codes (USB HID dedicated protocol)
 mod action {
-    pub const SYNC_SCREEN: u8 = 128;      // 0x80
-    pub const READ_DEVICE_INFO: u8 = 130;  // 0x82
-    pub const SET_LED_EFFECT: u8 = 133;    // 0x85
-    pub const SET_SECTION_LED: u8 = 134;   // 0x86
-    pub const SET_BRIGHTNESS: u8 = 135;    // 0x87
-    pub const SET_DYNAMIC_SPEED: u8 = 138;     // 0x8A
-    pub const TURN_OFF_LIGHT: u8 = 151;        // 0x97
-    pub const SET_COMPUTER_RHYTHM: u8 = 152;   // 0x98
+    pub const SYNC_SCREEN: u8 = 128; // 0x80
+    pub const READ_DEVICE_INFO: u8 = 130; // 0x82
+    pub const SET_LED_EFFECT: u8 = 133; // 0x85
+    pub const SET_SECTION_LED: u8 = 134; // 0x86
+    pub const SET_BRIGHTNESS: u8 = 135; // 0x87
+    pub const SET_DYNAMIC_SPEED: u8 = 138; // 0x8A
+    pub const TURN_OFF_LIGHT: u8 = 151; // 0x97
+    pub const SET_COMPUTER_RHYTHM: u8 = 152; // 0x98
 }
 
 /// wireMap: color channel order of the LED device
@@ -170,7 +170,10 @@ pub fn turn_off_light() -> Vec<u8> {
 /// Computer rhythm (setComputerRhythm = 0x98)
 /// 8 bytes: "RB" + 8 + sid + 152 + effectIndex + volume(0-100) + checksum
 pub fn set_computer_rhythm(effect_index: u8, volume: u8) -> Vec<u8> {
-    build_rb_packet(action::SET_COMPUTER_RHYTHM, &[effect_index, volume.min(100)])
+    build_rb_packet(
+        action::SET_COMPUTER_RHYTHM,
+        &[effect_index, volume.min(100)],
+    )
 }
 
 // ── Packet utilities ──
@@ -180,9 +183,7 @@ pub fn chunk_packet(packet: &[u8]) -> Vec<Vec<u8>> {
     if packet.len() <= MAX_CHUNK_SIZE {
         return vec![packet.to_vec()];
     }
-    packet.chunks(MAX_CHUNK_SIZE)
-        .map(|c| c.to_vec())
-        .collect()
+    packet.chunks(MAX_CHUNK_SIZE).map(|c| c.to_vec()).collect()
 }
 
 /// Parsed response packet
@@ -221,7 +222,17 @@ mod tests {
     fn rb_turn_off_golden() {
         // "RB"(0x52,0x42) + len 6 + sid 1 + 0x97 + chk
         let p = build_rb_packet_with_sid(1, action::TURN_OFF_LIGHT, &[]);
-        assert_eq!(p, vec![0x52, 0x42, 0x06, 0x01, 0x97, 0x52u8.wrapping_add(0x42 + 6 + 1).wrapping_add(0x97)]);
+        assert_eq!(
+            p,
+            vec![
+                0x52,
+                0x42,
+                0x06,
+                0x01,
+                0x97,
+                0x52u8.wrapping_add(0x42 + 6 + 1).wrapping_add(0x97)
+            ]
+        );
         assert_eq!(p.len(), 6);
     }
 
@@ -263,7 +274,10 @@ mod tests {
         assert_eq!(chunk_packet(&[1; 10]).len(), 1);
         assert_eq!(chunk_packet(&[1; 64]).len(), 1);
         let c = chunk_packet(&[1; 130]);
-        assert_eq!(c.iter().map(|x| x.len()).collect::<Vec<_>>(), vec![64, 64, 2]);
+        assert_eq!(
+            c.iter().map(|x| x.len()).collect::<Vec<_>>(),
+            vec![64, 64, 2]
+        );
     }
 
     #[test]
