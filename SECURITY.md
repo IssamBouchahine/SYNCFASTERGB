@@ -22,7 +22,7 @@ hobby project, so there is no guaranteed turnaround.
 | Screen content | Downscaled in memory; never written to disk or logged. |
 | Live preview | The settings window reads the strip colors (at most 255 RGB values, not screen pixels) from a same-user shared-memory block; never written to disk or sent anywhere. |
 | Strip power | Whole-strip power budget (default 40%, hard cap 80%); the app lowers it itself if the strip drops off the bus under load. |
-| Config file | User-writable; size-capped, parsed strictly, every value range-clamped. |
+| Settings | Stored in the per-user registry, not a file; size-capped, parsed strictly, every value range-clamped. The program creates no files. |
 | USB device | Only VID `0x1A86` / PID `0xFE07`; HID replies are bounds-checked. |
 | Supply chain | `Cargo.lock` committed; builds use `--locked`; Actions pinned by SHA; Dependabot enabled. |
 | Releases | SHA-256 checksums and GitHub build-provenance attestations. |

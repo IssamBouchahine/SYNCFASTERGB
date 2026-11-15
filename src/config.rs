@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[derive(Default)]
@@ -201,6 +200,12 @@ fn default_edge_number() -> u8 { 3 }
 fn default_255() -> u8 { 255 }
 fn default_50() -> u8 { 50 }
 
+/// Where the settings live. A registry value instead of a file keeps the whole program a
+/// single exe: no config file, no log file, nothing next to it.
+const STORE_KEY: &str = r"Software\SYNCFASTERGB";
+const VALUE_SETTINGS: &str = "Settings";
+const VALUE_REVISION: &str = "Revision";
+
 impl SyncConfig {
     pub fn interval_ms(&self) -> u64 {
         self.speed as u64 + 16
@@ -208,17 +213,21 @@ impl SyncConfig {
 }
 
 impl Config {
-    /// Refuse absurdly large config files (the file is user-writable).
-    const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+    /// Stored settings text larger than this is rejected.
+    pub const MAX_SETTINGS_BYTES: usize = 64 * 1024;
 
-    pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        if std::fs::metadata(path)?.len() > Self::MAX_CONFIG_BYTES {
-            return Err("config file too large".into());
+    /// Parse and sanitize settings text (TOML).
+    pub fn from_toml(text: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        if text.len() > Self::MAX_SETTINGS_BYTES {
+            return Err("settings too large".into());
         }
-        let content = std::fs::read_to_string(path)?;
-        let mut config: Config = toml::from_str(&content)?;
+        let mut config: Config = toml::from_str(text)?;
         config.sanitize();
         Ok(config)
+    }
+
+    pub fn to_toml(&self) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(toml::to_string_pretty(self)?)
     }
 
     /// Clamp every value into a range the rest of the program can safely use.
@@ -250,66 +259,69 @@ impl Config {
         self.effect.effect_speed = self.effect.effect_speed.clamp(1, 100);
     }
 
+    /// Current settings, or the defaults when nothing has been saved yet (nothing is written).
     pub fn load_or_default() -> Self {
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-
-        let candidates = [
-            exe_dir.as_ref().map(|d| d.join("config.toml")),
-            Some(Path::new("config.toml").to_path_buf()),
-        ];
-
-        for candidate in candidates.iter().flatten() {
-            if candidate.exists() {
-                match Self::load(candidate) {
-                    Ok(cfg) => {
-                        log::debug!("설정 로드 완료: {}", candidate.display());
-                        return cfg;
-                    }
-                    Err(e) => {
-                        log::warn!("설정 파일 파싱 실패 ({}): {}", candidate.display(), e);
-                    }
-                }
-            }
-        }
-
-        log::info!("config.toml 없음, 기본 설정 사용");
-        Self::default()
+        Self::load_from_key(STORE_KEY).unwrap_or_default()
     }
 
-    pub fn config_path() -> PathBuf {
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-
-        if let Some(ref dir) = exe_dir {
-            let path = dir.join("config.toml");
-            if path.exists() {
-                return path;
+    pub fn load_from_key(key_path: &str) -> Option<Self> {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+        let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey(key_path).ok()?;
+        let text: String = key.get_value(VALUE_SETTINGS).ok()?;
+        match Self::from_toml(&text) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                log::warn!("stored settings unreadable ({e}): using defaults");
+                None
             }
         }
-
-        let cwd_path = PathBuf::from("config.toml");
-        if cwd_path.exists() {
-            return cwd_path;
-        }
-
-        exe_dir
-            .map(|d| d.join("config.toml"))
-            .unwrap_or_else(|| PathBuf::from("config.toml"))
     }
 
-    pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let header = "# SYNCFASTERGB settings\n\n";
-        let content = toml::to_string_pretty(self)?;
-        let full = format!("{}{}", header, content);
-        // Don't rewrite an identical file (saves flash wear and needless hot-reloads).
-        if std::fs::read_to_string(path).is_ok_and(|old| old == full) {
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.save_to_key(STORE_KEY)
+    }
+
+    /// Write the settings and bump the revision counter the tray polls for hot reload.
+    /// An identical value is not rewritten.
+    pub fn save_to_key(&self, key_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+        let text = self.to_toml()?;
+        let (key, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(key_path)?;
+        if key.get_value::<String, _>(VALUE_SETTINGS).is_ok_and(|old| old == text) {
             return Ok(());
         }
-        std::fs::write(path, full)?;
+        key.set_value(VALUE_SETTINGS, &text)?;
+        let rev: u32 = key.get_value(VALUE_REVISION).unwrap_or(0);
+        key.set_value(VALUE_REVISION, &rev.wrapping_add(1))?;
         Ok(())
+    }
+
+    /// Counter that changes whenever settings are saved (0 when nothing is stored).
+    pub fn revision() -> u32 {
+        Self::revision_of(STORE_KEY)
+    }
+
+    pub fn revision_of(key_path: &str) -> u32 {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+        RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(key_path)
+            .and_then(|k| k.get_value::<u32, _>(VALUE_REVISION))
+            .unwrap_or(0)
+    }
+
+    /// Remove everything this program stores on the PC: the settings and the autostart entry.
+    pub fn forget_everything() -> Result<(), Box<dyn std::error::Error>> {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+        match RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(STORE_KEY) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        set_autostart(false)
     }
 }
 
@@ -435,13 +447,46 @@ mod tests {
     }
 
     #[test]
-    fn oversized_config_file_is_rejected() {
-        let dir = std::env::temp_dir().join("syncfastergb_cfg_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("big.toml");
-        std::fs::write(&p, "#".repeat(70 * 1024)).unwrap();
-        assert!(Config::load(&p).is_err());
-        let _ = std::fs::remove_file(&p);
+    fn oversized_settings_are_rejected() {
+        assert!(Config::from_toml(&"#".repeat(70 * 1024)).is_err());
+        assert!(Config::from_toml("").is_ok());
+    }
+
+    #[test]
+    fn registry_round_trip_revision_and_no_rewrite() {
+        let key = r"Software\SYNCFASTERGB_Test_roundtrip";
+        let _ = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).delete_subkey_all(key);
+        assert!(Config::load_from_key(key).is_none());
+        assert_eq!(Config::revision_of(key), 0);
+
+        let mut c = Config::default();
+        c.device.lamps_amount = 71;
+        c.sync.brightness = 123;
+        c.save_to_key(key).unwrap();
+        assert_eq!(Config::revision_of(key), 1);
+        let back = Config::load_from_key(key).unwrap();
+        assert_eq!(back.device.lamps_amount, 71);
+        assert_eq!(back.sync.brightness, 123);
+
+        c.save_to_key(key).unwrap(); // identical: no rewrite, revision unchanged
+        assert_eq!(Config::revision_of(key), 1);
+        c.sync.brightness = 200;
+        c.save_to_key(key).unwrap();
+        assert_eq!(Config::revision_of(key), 2);
+
+        let _ = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).delete_subkey_all(key);
+        assert!(Config::load_from_key(key).is_none());
+    }
+
+    #[test]
+    fn corrupt_stored_settings_fall_back_to_none() {
+        use winreg::enums::HKEY_CURRENT_USER;
+        let key = r"Software\SYNCFASTERGB_Test_corrupt";
+        let hk = winreg::RegKey::predef(HKEY_CURRENT_USER);
+        let (k, _) = hk.create_subkey(key).unwrap();
+        k.set_value("Settings", &"this is [not valid toml".to_string()).unwrap();
+        assert!(Config::load_from_key(key).is_none());
+        let _ = hk.delete_subkey_all(key);
     }
 
     #[test]

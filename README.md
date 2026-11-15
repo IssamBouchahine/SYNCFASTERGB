@@ -1,7 +1,8 @@
 # SYNCFASTERGB
 
 Lightweight screen-sync ambient lighting for USB HID LED strips (USB `1A86:FE07`) on Windows 10/11.
-One self-contained `.exe`: tray app + settings window, no installer, no runtime to install.
+One self-contained `.exe`: tray app + settings window, no installer, no runtime to install, and
+**no other files**: it never creates a config file, a log file or a folder next to itself.
 
 > **Not independently audited. Provided as-is, with no warranty.** See [SECURITY.md](SECURITY.md).
 
@@ -30,11 +31,16 @@ Typical cost on an RTX 4060 laptop at 2560x1440, 30 fps: about 40 MB RAM, a few 
 
 Close the vendor's own app first: only one program can drive the strip at a time.
 
-Command line: `--settings` (open the settings window), `--list-monitors`, `--console` (show log output).
+Command line: `--settings` (open the settings window), `--list-monitors`, `--console` (show log output),
+`--print-settings` (show the saved settings as text), `--import-settings FILE` (load settings from a text file).
 
 ## Configuration
 
-`config.toml` next to the exe, hot-reloaded. Missing keys use defaults; every value is range-clamped.
+There is no config file. Settings are saved when you change them in the settings window, in one value
+under `HKEY_CURRENT_USER\Software\SYNCFASTERGB` (per user, no admin rights), and are applied live.
+Missing keys use defaults and every value is range-clamped. To edit by hand, run
+`syncfastergb.exe --print-settings`, change the text, and load it with `--import-settings FILE`.
+The settings window has a button that removes everything the app stored on the PC.
 
 | Key | Meaning |
 |---|---|
@@ -70,9 +76,9 @@ Designed to be gentle on the laptop and the strip:
   bus while drawing a lot, the app lowers its own budget for the rest of the session.
 - **Strip memory:** brightness is applied in software while syncing; commands that may be stored in
   the strip's flash (hardware-effect brightness) are debounced, so dragging a slider never floods it.
-- **Disk:** the app writes only `config.toml` (when you change a setting, and only if it changed) and a
-  size-capped log (about 1 MB, rotated). No steady background writes; the registry is touched only when
-  you toggle "Start with Windows".
+- **Disk:** the app writes no files at all. Settings go to a registry value (only when you change one,
+  and only if it changed); the startup entry is touched only when you toggle "Start with Windows".
+  Logging is off unless you start it with `--console`. No steady background writes.
 - **CPU/GPU:** frames are shrunk on the GPU that already drives your monitor; typical load is a few
   percent of one core while the picture is moving, and almost nothing on a still screen.
 - **Games:** the app runs at below-normal CPU priority and the lowest GPU scheduling priority, reads

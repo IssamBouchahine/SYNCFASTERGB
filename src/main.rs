@@ -11,10 +11,9 @@ mod config;
 mod device;
 mod gui;
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 
@@ -34,8 +33,34 @@ use device::serial::DeviceConnection;
 
 fn main() {
     // --console 플래그: 릴리즈에서도 콘솔 표시
-    if std::env::args().any(|a| a == "--console" || a == "--list-monitors") {
+    if std::env::args().any(|a| matches!(a.as_str(), "--console" | "--list-monitors" | "--print-settings" | "--import-settings")) {
         unsafe { attach_console(); }
+    }
+
+    // `--print-settings` writes the settings as text; `--import-settings FILE` stores a settings
+    // file (e.g. an old config.toml) in the registry. Neither creates any file.
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--print-settings") {
+            match Config::load_or_default().to_toml() {
+                Ok(t) => println!("{t}"),
+                Err(e) => println!("error: {e}"),
+            }
+            return;
+        }
+        if let Some(i) = args.iter().position(|a| a == "--import-settings") {
+            let result = args
+                .get(i + 1)
+                .ok_or_else(|| "usage: --import-settings <file>".to_string())
+                .and_then(|p| std::fs::read_to_string(p).map_err(|e| e.to_string()))
+                .and_then(|t| Config::from_toml(&t).map_err(|e| e.to_string()))
+                .and_then(|c| c.save().map_err(|e| e.to_string()));
+            match result {
+                Ok(()) => println!("settings imported"),
+                Err(e) => println!("import failed: {e}"),
+            }
+            return;
+        }
     }
 
     if std::env::args().any(|a| a == "--list-monitors") {
@@ -125,22 +150,13 @@ fn main() {
     log::info!("SYNCFASTERGB stopped");
 }
 
-/// 로거 초기화. windows_subsystem="windows" 빌드에서 stderr는 유실되므로
-/// exe 옆 syncrgb.log에 기록한다 (--console 시에는 기존대로 콘솔 출력).
+/// Logging never touches the disk. With `--console` the log goes to that console; otherwise it
+/// is discarded (the program is a single exe and leaves no files behind).
 fn init_logging() {
     let mut builder = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     builder.format_timestamp_millis();
-
     if !std::env::args().any(|a| a == "--console") {
-        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-            let path = dir.join("syncfastergb.log");
-            if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1_000_000) {
-                let _ = std::fs::rename(&path, dir.join("syncfastergb.log.old"));
-            }
-            if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                builder.target(env_logger::Target::Pipe(Box::new(file)));
-            }
-        }
+        builder.target(env_logger::Target::Pipe(Box::new(std::io::sink())));
     }
     builder.init();
 }
@@ -1167,8 +1183,7 @@ fn run_tray(running: Arc<AtomicBool>, active: Arc<AtomicBool>, config_version: A
     let event_loop = EventLoop::new().expect("이벤트 루프 생성 실패");
     let mut app = TrayApp {
         running, active, config_version,
-        config_path: Config::config_path(),
-        last_mtime: None, tick_counter: 0,
+        last_revision: Config::revision(), tick_counter: 0,
         tray: None, toggle_item: None, settings_item: None, quit_item: None,
         locale,
         link_status, last_link: u8::MAX,
@@ -1180,8 +1195,7 @@ struct TrayApp {
     running: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
     config_version: Arc<AtomicU32>,
-    config_path: PathBuf,
-    last_mtime: Option<SystemTime>,
+    last_revision: u32,
     tick_counter: u32,
     tray: Option<TrayIcon>,
     toggle_item: Option<MenuItem>,
@@ -1217,7 +1231,7 @@ impl ApplicationHandler for TrayApp {
         self.settings_item = Some(settings);
         self.quit_item = Some(quit);
         self.tray = Some(tray);
-        self.last_mtime = std::fs::metadata(&self.config_path).ok().and_then(|m| m.modified().ok());
+        self.last_revision = Config::revision();
     }
 
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
@@ -1281,29 +1295,26 @@ impl ApplicationHandler for TrayApp {
 
         self.tick_counter += 1;
         if self.tick_counter.is_multiple_of(10) {
-            if let Ok(meta) = std::fs::metadata(&self.config_path) {
-                if let Ok(mtime) = meta.modified() {
-                    if self.last_mtime != Some(mtime) {
-                        self.last_mtime = Some(mtime);
-                        self.config_version.fetch_add(1, Ordering::Relaxed);
+            let revision = Config::revision();
+            if revision != self.last_revision {
+                self.last_revision = revision;
+                self.config_version.fetch_add(1, Ordering::Relaxed);
 
-                        let new_locale = gui::detect_locale();
-                        if !std::ptr::eq(new_locale, self.locale) {
-                            self.locale = new_locale;
-                            if let Some(ref t) = self.toggle_item {
-                                if self.active.load(Ordering::Relaxed) {
-                                    t.set_text(self.locale.tray_pause);
-                                } else {
-                                    t.set_text(self.locale.tray_resume);
-                                }
-                            }
-                            if let Some(ref s) = self.settings_item {
-                                s.set_text(self.locale.tray_settings);
-                            }
-                            if let Some(ref q) = self.quit_item {
-                                q.set_text(self.locale.tray_quit);
-                            }
+                let new_locale = gui::detect_locale();
+                if !std::ptr::eq(new_locale, self.locale) {
+                    self.locale = new_locale;
+                    if let Some(ref t) = self.toggle_item {
+                        if self.active.load(Ordering::Relaxed) {
+                            t.set_text(self.locale.tray_pause);
+                        } else {
+                            t.set_text(self.locale.tray_resume);
                         }
+                    }
+                    if let Some(ref s) = self.settings_item {
+                        s.set_text(self.locale.tray_settings);
+                    }
+                    if let Some(ref q) = self.quit_item {
+                        q.set_text(self.locale.tray_quit);
                     }
                 }
             }

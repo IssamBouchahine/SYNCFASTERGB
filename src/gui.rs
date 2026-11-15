@@ -1,5 +1,4 @@
 use eframe::egui;
-use std::path::PathBuf;
 
 use crate::capture::monitors::{self, MonitorInfo};
 use crate::ipc::LedView;
@@ -341,9 +340,8 @@ pub fn run_settings_window() {
         return;
     };
     let locale = detect_locale();
-    let config_path = Config::config_path();
-    let config = Config::load(&config_path).unwrap_or_default();
-    let app = SettingsGui::new(config, config_path, locale);
+    let config = Config::load_or_default();
+    let app = SettingsGui::new(config, locale);
 
     let icon_data = generate_rgb_icon(32);
     let icon = egui::IconData { rgba: icon_data, width: 32, height: 32 };
@@ -469,7 +467,6 @@ const SAVE_DEBOUNCE: f64 = 0.25;
 
 struct SettingsGui {
     config: Config,
-    config_path: PathBuf,
     status_msg: String,
     status_time: f64,
     tab: Tab,
@@ -489,6 +486,7 @@ struct SettingsGui {
     last_probe: f64,
     strip_present: bool,
     engine_running: bool,
+    confirm_forget: bool,
 }
 
 /// Is the strip's LED interface visible on the USB bus right now? (cheap, no device is opened)
@@ -506,13 +504,12 @@ fn strip_present() -> bool {
 }
 
 impl SettingsGui {
-    fn new(config: Config, config_path: PathBuf, locale: &'static Locale) -> Self {
+    fn new(config: Config, locale: &'static Locale) -> Self {
         let tab = Tab::from_mode(&config.effect.mode);
         let led_on = config.effect.mode != LedMode::Off;
         let autostart = config::is_autostart_enabled();
         Self {
             config,
-            config_path,
             status_msg: String::new(),
             status_time: 0.0,
             tab,
@@ -531,6 +528,7 @@ impl SettingsGui {
             last_probe: -10.0,
             strip_present: false,
             engine_running: false,
+            confirm_forget: false,
         }
     }
 
@@ -575,7 +573,7 @@ impl SettingsGui {
         }
         self.config.effect.mode = if self.led_on { self.tab.to_mode() } else { LedMode::Off };
         self.config.sanitize();
-        match self.config.save(&self.config_path) {
+        match self.config.save() {
             Ok(()) => self.status_msg = self.locale.applied.into(),
             Err(e) => self.status_msg = format!("{}{}", self.locale.save_failed_prefix, e),
         }
@@ -1125,6 +1123,34 @@ impl SettingsGui {
             }
             if ui.checkbox(&mut self.config.app.turn_off_on_black, locale.turn_off_on_black).changed() {
                 self.save_and_apply(0.0);
+            }
+            ui.add_space(6.0);
+            if self.confirm_forget {
+                ui.label(
+                    egui::RichText::new("This removes every saved setting and the Windows startup entry. The program file itself stays where it is.")
+                        .size(12.0)
+                        .color(theme::WARN),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Yes, remove everything").clicked() {
+                        match Config::forget_everything() {
+                            Ok(()) => {
+                                self.config = Config::default();
+                                self.autostart = false;
+                                self.dirty = false;
+                                self.status_msg = "All saved data removed".into();
+                            }
+                            Err(e) => self.status_msg = format!("{}{}", locale.save_failed_prefix, e),
+                        }
+                        self.status_time = ui.input(|i| i.time);
+                        self.confirm_forget = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_forget = false;
+                    }
+                });
+            } else if ui.button("Remove all saved settings from this PC").clicked() {
+                self.confirm_forget = true;
             }
         });
 
