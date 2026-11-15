@@ -32,6 +32,29 @@ hobby project, so there is no guaranteed turnaround.
 gh attestation verify .\syncfastergb.exe --repo IssamBouchahine/SYNCFASTERGB
 ```
 
+## The strip also presents itself as a keyboard
+
+The supported strip (USB `1A86:FE07`) is a composite device: interface 0 is the vendor-defined
+LED channel this app uses, and interface 1 is a **HID keyboard**. Its firmware uses that keyboard
+to press Win+R and type a command (it opens the vendor's software download page) every time
+the strip is plugged in. This comes from the firmware, not from this app, and Windows does not
+ask before trusting a new keyboard.
+
+SYNCFASTERGB never opens interface 1, so you can disable it without affecting the lighting.
+In an **administrator** PowerShell:
+
+```powershell
+# find the strip's keyboard (class Keyboard, "HID Keyboard Device")
+Get-PnpDevice -Class Keyboard -PresentOnly | Where-Object InstanceId -like 'HID\VID_1A86&PID_FE07&MI_01*'
+# disable it (use the InstanceId printed above; the USB\...\MI_01 interface node itself cannot be disabled)
+Disable-PnpDevice -InstanceId 'HID\VID_1A86&PID_FE07&MI_01\<suffix>' -Confirm:$false
+# alternative if the cmdlet refuses
+pnputil /disable-device "HID\VID_1A86&PID_FE07&MI_01\<suffix>"
+```
+
+To undo, run `Enable-PnpDevice` (or `pnputil /enable-device`) with the same id. Other computers you plug the strip into are
+still affected, and you should not plug it into a locked or unattended machine.
+
 ## Known limitations
 
 - Releases are not Authenticode-signed, so Windows SmartScreen may warn on first run.
