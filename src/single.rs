@@ -3,10 +3,16 @@
 
 use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, LPARAM, WAIT_OBJECT_0, WPARAM,
+};
+use windows::Win32::System::Threading::{
+    CreateMutexW, OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    PROCESS_TERMINATE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    FindWindowW, GetWindowThreadProcessId, IsIconic, PostMessageW, SetForegroundWindow, ShowWindow,
+    SW_RESTORE, SW_SHOW, WM_CLOSE,
 };
 
 /// Mutex held by the running tray app (the "engine").
@@ -60,6 +66,37 @@ pub fn acquire_with_retry(name: &str, wait: Duration) -> Option<InstanceGuard> {
             return None;
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Close the top-level window with exactly this title, as its close button would, and end its
+/// process if it has not gone within `grace` (a window that cannot respond must not stay behind
+/// in the taskbar). Returns whether such a window was found.
+pub fn close_window(title: &str, grace: Duration) -> bool {
+    let w = wide(title);
+    unsafe {
+        let hwnd = match FindWindowW(PCWSTR::null(), PCWSTR(w.as_ptr())) {
+            Ok(h) if !h.is_invalid() => h,
+            _ => return false,
+        };
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        // Never touch our own process
+        let process = if pid != 0 && pid != std::process::id() {
+            OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, false, pid).ok()
+        } else {
+            None
+        };
+        let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+        if let Some(p) = process {
+            if WaitForSingleObject(p, grace.as_millis().min(u32::MAX as u128) as u32)
+                != WAIT_OBJECT_0
+            {
+                let _ = TerminateProcess(p, 0);
+            }
+            let _ = CloseHandle(p);
+        }
+        true
     }
 }
 

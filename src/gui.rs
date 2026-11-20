@@ -503,6 +503,8 @@ impl Tab {
 
 /// Minimum seconds between config writes while a slider is being dragged.
 const SAVE_DEBOUNCE: f64 = 0.25;
+/// Seconds the app must be gone before the settings window closes itself.
+const ENGINE_GONE_GRACE: f64 = 4.0;
 
 struct SettingsGui {
     config: Config,
@@ -525,6 +527,10 @@ struct SettingsGui {
     last_probe: f64,
     strip_present: bool,
     engine_running: bool,
+    /// The app (tray engine) was running at some point while this window was open.
+    engine_seen: bool,
+    /// Since when the app has been gone, if it has been.
+    engine_gone_since: Option<f64>,
     confirm_forget: bool,
     // live picture for the detection-area illustration
     frame_view: Option<FrameView>,
@@ -644,6 +650,8 @@ impl SettingsGui {
             last_probe: -10.0,
             strip_present: false,
             engine_running: false,
+            engine_seen: false,
+            engine_gone_since: None,
             confirm_forget: false,
             frame_view: None,
             frame_seq: 0,
@@ -664,6 +672,23 @@ impl SettingsGui {
             self.last_probe = now;
             self.strip_present = strip_present();
             self.engine_running = crate::single::is_held(crate::single::APP_MUTEX);
+            if self.engine_running {
+                self.engine_seen = true;
+                self.engine_gone_since = None;
+            } else if self.engine_seen {
+                self.engine_gone_since.get_or_insert(now);
+            }
+        }
+        // The app this window belongs to has quit (or died): close with it instead of staying
+        // open, and in the taskbar, with nothing behind it. A short grace period covers the
+        // app restarting itself. A window opened on its own (no app was ever running) stays.
+        if self
+            .engine_gone_since
+            .is_some_and(|t| now - t >= ENGINE_GONE_GRACE)
+        {
+            self.last_save = f64::NEG_INFINITY;
+            self.flush(ctx); // keep any change made in the last moments
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if self.led_view.is_none() && now - self.last_view_try > 1.0 {
             self.last_view_try = now;

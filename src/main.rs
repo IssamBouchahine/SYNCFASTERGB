@@ -171,6 +171,10 @@ fn main() {
 
     run_tray(running.clone(), active, config_version, locale, link_status);
 
+    // Quitting the app also closes its settings window (a separate process): otherwise the
+    // window would stay open, and in the taskbar, with nothing behind it.
+    single::close_window(gui::SETTINGS_TITLE, Duration::from_millis(1500));
+
     // Stop the threads after the tray exits (normal shutdown path)
     running.store(false, Ordering::SeqCst);
     let _ = capture_thread.join();
