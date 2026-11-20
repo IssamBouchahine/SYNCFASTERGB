@@ -128,7 +128,7 @@ fn main() {
         device_released.clone(),
     );
 
-    let (tx, rx) = mpsc::sync_channel::<Vec<(u8, u8, u8)>>(2);
+    let (tx, rx) = mpsc::sync_channel::<Vec<pipeline::Led>>(2);
 
     let capture_thread = {
         let running = running.clone();
@@ -211,7 +211,7 @@ fn capture_loop(
     running: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
     config_version: Arc<AtomicU32>,
-    tx: mpsc::SyncSender<Vec<(u8, u8, u8)>>,
+    tx: mpsc::SyncSender<Vec<pipeline::Led>>,
     screen_black: Arc<AtomicBool>,
 ) {
     let mut frame_interval = Duration::from_millis(1000 / config.capture.fps as u64);
@@ -276,7 +276,7 @@ fn capture_loop(
                                                          // Consecutive error counter (re-creates capture when it piles up)
     let mut consecutive_errors = 0u32;
     // Last send (lets smoothing settle on a still screen, and drives the keepalive)
-    let mut last_sent: Option<Vec<(u8, u8, u8)>> = None;
+    let mut last_sent: Option<Vec<pipeline::Led>> = None;
     let mut last_send_at = Instant::now();
     const KEEPALIVE: Duration = Duration::from_millis(500);
     // Performance statistics (debug log only)
@@ -466,11 +466,11 @@ fn capture_loop(
                 }
 
                 // Black screen detection: are all LED colors nearly black?
-                const BLACK_SUM_THRESHOLD: u16 = 15;
+                const BLACK_SUM_THRESHOLD: f32 = 15.0;
                 if turn_off_on_black {
                     let is_black = colors
                         .iter()
-                        .all(|&(r, g, b)| (r as u16 + g as u16 + b as u16) < BLACK_SUM_THRESHOLD);
+                        .all(|c| c[0] + c[1] + c[2] < BLACK_SUM_THRESHOLD);
                     if is_black {
                         black_frame_count = black_frame_count.saturating_add(1);
                     } else {
@@ -718,7 +718,7 @@ fn sender_loop(
     config: Config,
     running: Arc<AtomicBool>,
     config_version: Arc<AtomicU32>,
-    rx: mpsc::Receiver<Vec<(u8, u8, u8)>>,
+    rx: mpsc::Receiver<Vec<pipeline::Led>>,
     monitor_off: Arc<AtomicBool>,
     screen_black: Arc<AtomicBool>,
     suspend_pending: Arc<AtomicBool>,
@@ -731,6 +731,8 @@ fn sender_loop(
     let mut grade_params = grade_from_config(&config.sync);
     let mut power_limit = power_from_config(&config.sync);
     let mut led_share = ipc::LedShare::create();
+    // Rounds the graded colours to the strip's 8-bit levels, dithering over time while they fade
+    let mut dither = pipeline::Dither::new();
     // Brownout guard: if the strip keeps dropping off the bus while drawing a lot of power,
     // that looks like the USB port tripping its overcurrent protection. Lower our own
     // budget for the rest of the session instead of asking for the same power again.
@@ -928,14 +930,16 @@ fn sender_loop(
         if current_mode == LedMode::Sync {
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(colors) => {
-                    let mut graded: Vec<[u8; 3]> = colors
+                    let mut graded: Vec<pipeline::Led> = colors
                         .iter()
-                        .map(|&(r, g, b)| pipeline::grade([r, g, b], &grade_params))
+                        .map(|&c| pipeline::grade(c, &grade_params))
                         .collect();
                     if let Some(fraction) = effective_power_limit(power_limit, derate) {
                         pipeline::limit_total_power(&mut graded, fraction);
                     }
                     let last_draw = pipeline::power_fraction(&graded);
+                    // the one rounding in the whole chain, with temporal dithering while fading
+                    let graded = dither.apply(&graded);
                     if let Some(share) = led_share.as_mut() {
                         share.publish(&graded);
                     }

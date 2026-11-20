@@ -8,7 +8,7 @@
 //! Everything except `ColorExtractor::extract`'s clock and smoother is a pure function of the
 //! pixel data, so it is unit-tested on synthetic frames.
 
-use super::pipeline::Smoother;
+use super::pipeline::{Led, Smoother};
 use crate::config::SyncConfig;
 use std::time::Instant;
 
@@ -491,13 +491,7 @@ impl ColorExtractor {
     }
 
     /// Extract one color per LED from a BGRA frame.
-    pub fn extract(
-        &mut self,
-        data: &[u8],
-        pitch: u32,
-        width: u32,
-        height: u32,
-    ) -> Vec<(u8, u8, u8)> {
+    pub fn extract(&mut self, data: &[u8], pitch: u32, width: u32, height: u32) -> Vec<Led> {
         if self.last_dims != (width, height) {
             self.last_dims = (width, height);
             self.smoother.reset();
@@ -553,12 +547,13 @@ impl ColorExtractor {
         let mapped = map_to_leds(&border, self.lamp_count);
         let raw: Vec<[u8; 3]> = mapped.iter().map(|c| [c.r, c.g, c.b]).collect();
 
-        let out = if self.smoothing {
+        if self.smoothing {
             self.smoother.update(&raw, dt_ms)
         } else {
-            raw
-        };
-        out.into_iter().map(|c| (c[0], c[1], c[2])).collect()
+            raw.iter()
+                .map(|c| [c[0] as f32, c[1] as f32, c[2] as f32])
+                .collect()
+        }
     }
 }
 
@@ -1056,7 +1051,7 @@ mod tests {
         }
         assert_eq!(ex.bars(), (8, 8, 0, 0));
         assert!(
-            out.iter().any(|c| c.0 > 100),
+            out.iter().any(|c| c[0] > 100.0),
             "LEDs carry the picture colour, not black"
         );
         assert!((10..=20).contains(&ex.effective_depth()));
