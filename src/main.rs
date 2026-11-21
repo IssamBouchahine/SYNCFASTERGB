@@ -755,6 +755,12 @@ fn sender_loop(
 
     let mut local_version = 0u32;
     let mut send_count = 0u64;
+    // Send statistics (debug log only): how often the strip really gets a frame, and how long
+    // a write takes
+    let mut stat_sends = 0u32;
+    let mut stat_write = Duration::ZERO;
+    let mut stat_write_max = Duration::ZERO;
+    let mut stat_since = Instant::now();
     let mut blanked_by_screen = false;
 
     // Audio meter for computer rhythm (created on demand)
@@ -963,7 +969,25 @@ fn sender_loop(
                     }
                     send_count += 1;
 
-                    if let Err(e) = d.set_sync_screen(&color_data) {
+                    let t_write = Instant::now();
+                    let sent = d.set_sync_screen(&color_data);
+                    let took = t_write.elapsed();
+                    stat_sends += 1;
+                    stat_write += took;
+                    stat_write_max = stat_write_max.max(took);
+                    if stat_since.elapsed() >= Duration::from_secs(5) {
+                        log::debug!(
+                            "strip updates: {:.1}/s, write {:.2} ms avg / {:.2} ms max",
+                            stat_sends as f64 / stat_since.elapsed().as_secs_f64(),
+                            stat_write.as_secs_f64() * 1000.0 / stat_sends.max(1) as f64,
+                            stat_write_max.as_secs_f64() * 1000.0
+                        );
+                        stat_sends = 0;
+                        stat_write = Duration::ZERO;
+                        stat_write_max = Duration::ZERO;
+                        stat_since = Instant::now();
+                    }
+                    if let Err(e) = sent {
                         if device::serial::classify_error(e.as_ref())
                             == device::serial::WriteFailure::Gone
                             && last_draw > 0.3
@@ -1170,8 +1194,19 @@ fn effective_power_limit(base: Option<f32>, derate: f32) -> Option<f32> {
 fn grade_from_config(sync: &config::SyncConfig) -> pipeline::Grade {
     pipeline::Grade {
         saturation_gain: sync.saturation,
-        gamma: sync.gamma,
+        // accurate matching uses its own brightness curve; vivid keeps the older gamma setting
+        gamma: if sync.accurate_color {
+            sync.match_gamma
+        } else {
+            sync.gamma
+        },
         brightness: sync.brightness as f32 / 255.0,
+        accurate: sync.accurate_color,
+        gains: [
+            sync.balance_r as f32 / 100.0,
+            sync.balance_g as f32 / 100.0,
+            sync.balance_b as f32 / 100.0,
+        ],
         ..pipeline::Grade::default()
     }
 }

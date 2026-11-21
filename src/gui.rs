@@ -1282,24 +1282,80 @@ impl SettingsGui {
         // Color
         section(ui, locale.color_processing, |ui| {
             let mut ch = false;
-            ch |= slider_row(
-                ui,
-                locale.saturation.trim_end_matches(':'),
-                &mut self.config.sync.saturation,
-                0.0,
-                3.0,
-                "",
-                2,
-            );
-            ch |= slider_row(
-                ui,
-                locale.gamma.trim_end_matches(':'),
-                &mut self.config.sync.gamma,
-                0.3,
-                3.0,
-                "",
-                2,
-            );
+            ch |= ui
+                .checkbox(
+                    &mut self.config.sync.accurate_color,
+                    "Accurate color matching (recommended)",
+                )
+                .changed();
+            if self.config.sync.accurate_color {
+                ui.label(
+                    egui::RichText::new(
+                        "Shows the screen's real light on the strip, so dark shades, browns, pastels and fades look the same \
+                         on both. Switch it off for the older, more saturated look.",
+                    )
+                    .size(11.5)
+                    .color(theme::MUTED),
+                );
+                ch |= slider_row(
+                    ui,
+                    "Brightness curve",
+                    &mut self.config.sync.match_gamma,
+                    1.0,
+                    3.0,
+                    "",
+                    2,
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "2.2 follows the screen exactly. Lower values make dark scenes brighter on the strip.",
+                    )
+                    .size(11.5)
+                    .color(theme::MUTED),
+                );
+                let balance = |ui: &mut egui::Ui, name: &str, v: &mut u8| -> bool {
+                    let mut pct = *v as f32;
+                    let changed = slider_row(ui, name, &mut pct, 20.0, 100.0, " %", 0);
+                    *v = pct.round().clamp(20.0, 100.0) as u8;
+                    changed
+                };
+                ch |= balance(ui, "Red strength", &mut self.config.sync.balance_r);
+                ch |= balance(ui, "Green strength", &mut self.config.sync.balance_g);
+                ch |= balance(ui, "Blue strength", &mut self.config.sync.balance_b);
+                ui.label(
+                    egui::RichText::new(
+                        "If a white screen looks tinted on the strip (bluish, pinkish, yellowish), lower the channel that is too strong.",
+                    )
+                    .size(11.5)
+                    .color(theme::MUTED),
+                );
+                if ui.button("Reset color matching").clicked() {
+                    self.config.sync.match_gamma = 2.2;
+                    self.config.sync.balance_r = 100;
+                    self.config.sync.balance_g = 100;
+                    self.config.sync.balance_b = 100;
+                    ch = true;
+                }
+            } else {
+                ch |= slider_row(
+                    ui,
+                    locale.saturation.trim_end_matches(':'),
+                    &mut self.config.sync.saturation,
+                    0.0,
+                    3.0,
+                    "",
+                    2,
+                );
+                ch |= slider_row(
+                    ui,
+                    locale.gamma.trim_end_matches(':'),
+                    &mut self.config.sync.gamma,
+                    0.3,
+                    3.0,
+                    "",
+                    2,
+                );
+            }
             ch |= ui
                 .checkbox(
                     &mut self.config.sync.light_compression,

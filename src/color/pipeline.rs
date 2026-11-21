@@ -166,9 +166,15 @@ pub struct Grade {
     pub knee_hi: u8,
     /// Final software brightness scale 0.0..=1.0 (applied after the power limit).
     pub brightness: f32,
+    /// Accurate colour matching: the screen's encoded values become real light (`gamma`), no
+    /// saturation boost and no purifying; `gains` correct a tint of the strip's LEDs.
+    pub accurate: bool,
+    /// Per-channel strength (R, G, B) in accurate mode, 0.0..=1.0.
+    pub gains: [f32; 3],
 }
 
 impl Default for Grade {
+    /// The older "vivid" look; the app builds its own grade from the settings.
     fn default() -> Self {
         Self {
             saturation_gain: 2.0,
@@ -177,6 +183,8 @@ impl Default for Grade {
             knee_lo: 8,
             knee_hi: 28,
             brightness: 1.0,
+            accurate: false,
+            gains: [1.0; 3],
         }
     }
 }
@@ -229,15 +237,19 @@ fn purify(c: Led) -> Led {
 /// below `LOW` of the strongest one is dropped, it fades back in up to `HIGH`, and everything
 /// stronger than that (orange, pink, purple, skin tones, whites) is left exactly as it was.
 fn suppress_stray(c: Led) -> Led {
-    const LOW: f32 = 0.08;
-    const HIGH: f32 = 0.30;
+    suppress_stray_between(c, 0.08, 0.30)
+}
+
+/// `suppress_stray` with its own thresholds (a channel below `low` of the strongest one is
+/// dropped, from `high` up it is kept untouched).
+fn suppress_stray_between(c: Led, low: f32, high: f32) -> Led {
     let m = c[0].max(c[1]).max(c[2]);
     if m <= 0.0 {
         return c;
     }
     let keep = |v: f32| -> f32 {
         let r = v / m;
-        let t = ((r - LOW) / (HIGH - LOW)).clamp(0.0, 1.0);
+        let t = ((r - low) / (high - low)).clamp(0.0, 1.0);
         let w = t * t * (3.0 - 2.0 * t); // smoothstep
         v * w
     };
@@ -316,9 +328,15 @@ fn apply_gamma(c: Led, gamma: f32) -> Led {
     [f(c[0]), f(c[1]), f(c[2])]
 }
 
-/// Whole-strip power budget. Individual LEDs may reach full intensity; only when the
-/// strip as a whole would draw more than `max_fraction` of "every LED fully white" are all
-/// LEDs scaled down together (keeps hue, protects weak USB ports).
+/// Where the power limiter starts to ease in, as a fraction of the budget. Below it nothing is
+/// touched; above it the total is compressed smoothly towards the budget, so a fade through the
+/// limit never sits on a plateau, and the budget is still never exceeded.
+const SOFT_KNEE: f64 = 0.7;
+
+/// Whole-strip power budget. Individual LEDs may reach full intensity; only when the strip as a
+/// whole approaches `max_fraction` of "every LED fully white" are all LEDs scaled down together
+/// (keeps hue, protects weak USB ports). The total approaches the budget smoothly and never
+/// exceeds it.
 pub fn limit_total_power(leds: &mut [Led], max_fraction: f32) {
     if leds.is_empty() {
         return;
@@ -328,15 +346,29 @@ pub fn limit_total_power(leds: &mut [Led], max_fraction: f32) {
     } else {
         max_fraction.clamp(0.0, 1.0)
     };
+    if f >= 1.0 {
+        return; // a budget of everything-white can never be exceeded: no limit at all
+    }
     let total: f64 = leds
         .iter()
         .map(|c| c[0] as f64 + c[1] as f64 + c[2] as f64)
         .sum();
     let allowed = (leds.len() as f64) * 765.0 * f as f64;
-    if total <= allowed || total <= 0.0 {
+    if allowed <= 0.0 {
+        // a zero budget switches the strip off
+        for c in leds.iter_mut() {
+            *c = [0.0; 3];
+        }
         return;
     }
-    let k = (allowed / total) as f32;
+    let ratio = total / allowed;
+    if ratio <= SOFT_KNEE || total <= 0.0 {
+        return;
+    }
+    // ease in from the knee towards 1.0 (the budget), strictly increasing with the load
+    let eased =
+        SOFT_KNEE + (1.0 - SOFT_KNEE) * (1.0 - (-(ratio - SOFT_KNEE) / (1.0 - SOFT_KNEE)).exp());
+    let k = (eased / ratio) as f32;
     for c in leds.iter_mut() {
         for ch in c.iter_mut() {
             *ch *= k;
@@ -360,14 +392,26 @@ pub fn power_fraction(leds: &[Led]) -> f32 {
 /// strip power budget is applied afterwards by `limit_total_power`.
 pub fn grade(c: Led, g: &Grade) -> Led {
     let mut c = knee(c, g.knee_lo as f32, g.knee_hi as f32);
-    if g.purify {
-        c = purify(c);
+    if g.accurate {
+        // real light: undo the screen's encoding, keep the colour exactly, correct the strip's tint
+        c = apply_gamma(c, g.gamma);
+        c = suppress_stray_between(c, STRAY_LOW_LINEAR, STRAY_HIGH_LINEAR);
+        c = [c[0] * g.gains[0], c[1] * g.gains[1], c[2] * g.gains[2]];
+    } else {
+        if g.purify {
+            c = purify(c);
+        }
+        c = saturate(c, g.saturation_gain);
+        c = suppress_stray(c);
+        c = apply_gamma(c, g.gamma);
     }
-    c = saturate(c, g.saturation_gain);
-    c = suppress_stray(c);
-    c = apply_gamma(c, g.gamma);
     scale(c, g.brightness)
 }
+
+/// In accurate mode the strong LEDs' trace amounts are what make a deep red look pink; a channel
+/// under 1.5% of the strongest one (in light) is removed, from 6% up it is kept untouched.
+const STRAY_LOW_LINEAR: f32 = 0.015;
+const STRAY_HIGH_LINEAR: f32 = 0.06;
 
 fn scale(c: Led, b: f32) -> Led {
     let b = if b.is_nan() { 1.0 } else { b.clamp(0.0, 1.0) };
@@ -760,6 +804,136 @@ mod tests {
         assert!(near(suppress_stray([200.0, 0.0, 60.0])[2], 60.0, 0.01));
         // ties keep both strongest channels
         assert_eq!(suppress_stray([200.0, 200.0, 3.0]), [200.0, 200.0, 0.0]);
+    }
+
+    fn accurate(gamma: f32, gains: [f32; 3]) -> Grade {
+        Grade {
+            accurate: true,
+            gamma,
+            gains,
+            ..Grade::default()
+        }
+    }
+
+    /// Light the screen emits for an encoded value, in the strip's 0..255 drive units.
+    fn light(v: f32, gamma: f32) -> f32 {
+        255.0 * (v / 255.0).powf(gamma)
+    }
+
+    #[test]
+    fn accurate_mode_turns_encoded_values_into_real_light() {
+        let g = accurate(2.2, [1.0; 3]);
+        // the colours reported wrong on the strip: a dark red-brown and a pastel tan
+        let brown = grade(led([60, 30, 20]), &g);
+        let tan = grade(led([200, 140, 90]), &g);
+        for (out, src) in [(brown, [60.0, 30.0, 20.0]), (tan, [200.0, 140.0, 90.0])] {
+            for k in 0..3 {
+                assert!(
+                    near(out[k], light(src[k], 2.2), 0.6),
+                    "{src:?} channel {k}: {} vs {}",
+                    out[k],
+                    light(src[k], 2.2)
+                );
+            }
+        }
+        // no saturation boost: the brown stays dark and red-brown, the tan stays a soft amber
+        assert!(brown[0] < 12.0 && brown[1] < 3.0);
+        assert!(tan[1] / tan[0] > 0.4 && tan[2] / tan[0] > 0.15);
+        // pure primaries, white and black are exact
+        assert_eq!(grade([255.0, 0.0, 0.0], &g), [255.0, 0.0, 0.0]);
+        assert_eq!(grade([0.0, 255.0, 0.0], &g), [0.0, 255.0, 0.0]);
+        assert_eq!(grade([255.0; 3], &g), [255.0; 3]);
+        assert_eq!(grade([0.0; 3], &g), [0.0; 3]);
+    }
+
+    #[test]
+    fn accurate_mode_keeps_every_colour_in_a_sweep() {
+        // 17 steps per channel: 4913 colours covering shades, pastels, browns, skin, greys...
+        let g = accurate(2.2, [1.0; 3]);
+        let steps: Vec<f32> = (0..=16).map(|i| i as f32 * 15.9375).collect();
+        let mut checked = 0;
+        for &r in &steps {
+            for &gr in &steps {
+                for &b in &steps {
+                    let out = grade([r, gr, b], &g);
+                    assert!(
+                        out.iter()
+                            .all(|v| v.is_finite() && (0.0..=255.0).contains(v)),
+                        "{r} {gr} {b} -> {out:?}"
+                    );
+                    let m = r.max(gr).max(b);
+                    if m < 40.0 {
+                        continue; // the black knee shapes near-black on purpose
+                    }
+                    let want = [light(r, 2.2), light(gr, 2.2), light(b, 2.2)];
+                    let top = want[0].max(want[1]).max(want[2]);
+                    // the strongest channel is exact; every other channel is exact unless it is
+                    // a trace (under 6% of the strongest) that the stray filter may remove
+                    for k in 0..3 {
+                        if want[k] / top >= STRAY_HIGH_LINEAR {
+                            assert!(
+                                near(out[k], want[k], 0.01 * want[k] + 0.3),
+                                "{r} {gr} {b} channel {k}: {} vs {}",
+                                out[k],
+                                want[k]
+                            );
+                        } else {
+                            assert!(out[k] <= want[k] + 0.3, "traces are only ever removed");
+                        }
+                    }
+                    // the order of the channels is never swapped
+                    for (i, j) in [(0, 1), (1, 2), (0, 2)] {
+                        if want[i] > want[j] {
+                            assert!(out[i] >= out[j], "{r} {gr} {b}: order swapped {out:?}");
+                        }
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 4000, "{checked}");
+    }
+
+    #[test]
+    fn accurate_balance_lowers_one_channel_only() {
+        let full = grade(led([200, 150, 120]), &accurate(2.2, [1.0; 3]));
+        let blue_down = grade(led([200, 150, 120]), &accurate(2.2, [1.0, 1.0, 0.5]));
+        assert!(near(blue_down[0], full[0], 0.01) && near(blue_down[1], full[1], 0.01));
+        assert!(near(blue_down[2], full[2] * 0.5, 0.01));
+    }
+
+    #[test]
+    fn accurate_grey_ramp_follows_the_screen_in_every_step() {
+        // a fade of the whole screen: the strip must change with every step of the screen
+        let g = accurate(2.2, [1.0; 3]);
+        let mut prev = -1.0f32;
+        for v in 0..=255 {
+            let out = grade([v as f32; 3], &g)[0];
+            assert!(out >= prev, "never brighter before darker: {v} -> {out}");
+            if v >= 40 {
+                assert!(out > prev, "no flat step at {v}");
+            }
+            prev = out;
+        }
+    }
+
+    #[test]
+    fn the_power_limit_eases_in_so_a_fade_has_no_plateau() {
+        // a uniform scene getting brighter: the limiter never flattens the response completely
+        let mut prev = 0.0f32;
+        for step in 1..=100 {
+            let level = step as f32 * 2.55;
+            let mut leds = vec![[level; 3]; 71];
+            limit_total_power(&mut leds, 0.4);
+            let out = leds[0][0];
+            assert!(out > prev, "plateau at level {level}: {out} after {prev}");
+            assert!(power_fraction(&leds) <= 0.4 + 1e-4, "budget exceeded");
+            prev = out;
+        }
+        // a zero budget switches the strip off
+        let mut leds = vec![[200.0; 3]; 4];
+        limit_total_power(&mut leds, 0.0);
+        assert_eq!(leds, vec![[0.0; 3]; 4]);
     }
 
     #[test]

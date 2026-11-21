@@ -66,6 +66,22 @@ pub struct SyncConfig {
     /// Output hysteresis in 0..255 steps (suppresses shimmer).
     #[serde(default = "default_deadband")]
     pub deadband: f32,
+    /// Match the screen's colours as exactly as an RGB strip can: the screen's encoded values are
+    /// turned back into real light, so shades, browns, pastels and fades look the same on the
+    /// strip. Off = the older "vivid" look (`saturation` and `gamma` apply).
+    #[serde(default = "default_true")]
+    pub accurate_color: bool,
+    /// Brightness curve of accurate matching. 2.2 is what the screen itself does.
+    #[serde(default = "default_match_gamma")]
+    pub match_gamma: f32,
+    /// Per-channel strength in percent (100 = unchanged): lowers a channel the strip's LEDs
+    /// show too strongly, so white looks neutral.
+    #[serde(default = "default_balance")]
+    pub balance_r: u8,
+    #[serde(default = "default_balance")]
+    pub balance_g: u8,
+    #[serde(default = "default_balance")]
+    pub balance_b: u8,
     /// Whole-strip power budget in percent of "every LED fully white" (used when
     /// `light_compression` is on). Highlights can reach full brightness; only the total is capped.
     #[serde(default = "default_power_limit_pct")]
@@ -200,6 +216,12 @@ fn default_gamma() -> f32 {
 fn default_saturation() -> f32 {
     2.0
 }
+fn default_match_gamma() -> f32 {
+    2.2
+}
+fn default_balance() -> u8 {
+    100
+}
 fn default_attack_ms() -> f32 {
     40.0
 }
@@ -302,6 +324,10 @@ impl Config {
         s.power_limit_pct = s.power_limit_pct.clamp(10, MAX_POWER_LIMIT_PCT);
         s.edge_depth_pct = s.edge_depth_pct.clamp(3, 40);
         s.black_level = s.black_level.clamp(2, 80);
+        s.match_gamma = f(s.match_gamma, 1.0, 3.0, 2.2);
+        s.balance_r = s.balance_r.clamp(20, 100);
+        s.balance_g = s.balance_g.clamp(20, 100);
+        s.balance_b = s.balance_b.clamp(20, 100);
         if s.edge_number != 3 && s.edge_number != 4 {
             s.edge_number = 3;
         }
@@ -472,6 +498,11 @@ impl Default for SyncConfig {
             attack_ms: default_attack_ms(),
             decay_ms: default_decay_ms(),
             deadband: default_deadband(),
+            accurate_color: true,
+            match_gamma: default_match_gamma(),
+            balance_r: default_balance(),
+            balance_g: default_balance(),
+            balance_b: default_balance(),
             power_limit_pct: default_power_limit_pct(),
             detect_auto: true,
             edge_depth_pct: default_edge_depth_pct(),
@@ -556,6 +587,15 @@ mod tests {
         assert_eq!(c.capture.fps, 60);
         assert_eq!(c.capture.game_fps, 30);
         assert!(c.sync.detect_auto, "automatic detection is on by default");
+        assert!(
+            c.sync.accurate_color,
+            "accurate colour matching is on by default"
+        );
+        assert_eq!(c.sync.match_gamma, 2.2);
+        assert_eq!(
+            (c.sync.balance_r, c.sync.balance_g, c.sync.balance_b),
+            (100, 100, 100)
+        );
         assert_eq!(c.sync.edge_depth_pct, 15);
         assert!(c.sync.skip_black_bars);
         assert_eq!(c.sync.black_level, 26);
