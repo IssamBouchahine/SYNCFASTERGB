@@ -20,6 +20,8 @@ const GAP_AVERAGE_MS: f32 = 200.0;
 /// While a channel is moving its value is passed on unrounded, so a slow fade is smooth; while it
 /// holds still, rounding plus a small hysteresis band keeps a noisy picture from shimmering.
 pub struct Smoother {
+    /// First of the two filter stages (see `update`).
+    stage: Vec<Led>,
     state: Vec<Led>,
     /// What is passed on: the state while moving, a rounded and held value while still.
     out: Vec<Led>,
@@ -58,6 +60,7 @@ fn to_led(c: [u8; 3]) -> Led {
 impl Smoother {
     pub fn new(attack_ms: f32, decay_ms: f32, deadband: f32) -> Self {
         Self {
+            stage: Vec::new(),
             state: Vec::new(),
             out: Vec::new(),
             gap: Vec::new(),
@@ -69,6 +72,7 @@ impl Smoother {
     }
 
     pub fn reset(&mut self) {
+        self.stage.clear();
         self.state.clear();
         self.out.clear();
         self.gap.clear();
@@ -85,6 +89,7 @@ impl Smoother {
 
         if self.state.len() != target.len() {
             self.state = target.iter().map(|&c| to_led(c)).collect();
+            self.stage = self.state.clone();
             self.out = self.state.clone();
             self.gap = vec![[0.0; 3]; target.len()];
             return self.out.clone();
@@ -101,6 +106,7 @@ impl Smoother {
             }
             if sum / target.len() as f32 > self.cut_threshold {
                 self.state = target.iter().map(|&c| to_led(c)).collect();
+                self.stage = self.state.clone();
                 self.out = self.state.clone();
                 self.gap = vec![[0.0; 3]; target.len()];
                 return self.out.clone();
@@ -123,14 +129,27 @@ impl Smoother {
                 let m = hue_change(t, self.state[i]);
                 self.decay_ms + (self.attack_ms - self.decay_ms) * m
             };
+            // Two equal filter stages in a row, each at half the time constant: the average delay
+            // is the same as one stage at `tau`, but the response starts gently and ends gently
+            // (an ease in and out) instead of lurching at the first frame of a change.
             // alpha is shared by all channels of one LED so hue does not drift.
-            let alpha = if tau <= 0.0 {
-                1.0
+            // The exact solution of the two stages for a target that holds for `dt`, so the result
+            // does not depend on how the time is cut into frames.
+            let x = if tau <= 0.0 {
+                f32::INFINITY
             } else {
-                1.0 - (-dt / tau).exp()
+                dt / (tau * 0.5)
             };
+            let a = (-x).exp();
             for k in 0..3 {
-                self.state[i][k] += (t[k] - self.state[i][k]) * alpha;
+                let (e1, e2) = (t[k] - self.stage[i][k], t[k] - self.state[i][k]);
+                let (n1, n2) = if x.is_finite() {
+                    (e1 * a, a * (e2 + x * e1))
+                } else {
+                    (0.0, 0.0)
+                };
+                self.stage[i][k] = t[k] - n1;
+                self.state[i][k] = t[k] - n2;
                 let s = self.state[i][k];
                 self.gap[i][k] += ((t[k] - s) - self.gap[i][k]) * gap_alpha;
                 let moving = self.gap[i][k].abs() > MOVING_GAP;
@@ -791,6 +810,40 @@ mod tests {
         let d = 100.0 - down.update(&solid(1, [0, 0, 0]), 33.0)[0][0];
 
         assert!(a > d, "attack step {a} should exceed decay step {d}");
+    }
+
+    #[test]
+    fn a_change_eases_in_and_out_without_overshoot() {
+        // A step in the screen colour: the strip starts gently (no lurch on the first frame),
+        // speeds up, then settles without ever passing the target, at 60 steps a second.
+        let mut s = Smoother::new(60.0, 60.0, 0.0);
+        s.cut_threshold = 1.0e9;
+        s.update(&solid(1, [0, 0, 0]), 16.0);
+        let mut v = Vec::new();
+        for _ in 0..60 {
+            v.push(s.update(&solid(1, [100, 100, 100]), 16.0)[0][0]);
+        }
+        let steps: Vec<f32> = v.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(v.iter().all(|&x| x <= 100.0 + 1e-3), "never overshoots");
+        assert!(steps.iter().all(|&d| d >= -1e-4), "never turns back");
+        // the first frame moves far less than a single-stage filter of the same delay would
+        let single = 100.0 * (1.0 - (-16.0f32 / 60.0).exp());
+        assert!(
+            v[0] < single * 0.5,
+            "first frame {} vs single stage {single}",
+            v[0]
+        );
+        // it speeds up after the gentle start, then slows down again towards the end
+        assert!(
+            steps[0] > v[0] * 1.5,
+            "second frame {} moves more than the first {}",
+            steps[0],
+            v[0]
+        );
+        assert!(steps[40] < steps[0] * 0.2, "settles gently");
+        // and the average delay stays about the time constant
+        let t63 = v.iter().position(|&x| x >= 63.2).unwrap() as f32 * 16.0;
+        assert!((40.0..140.0).contains(&t63), "reaches 63% after {t63} ms");
     }
 
     #[test]

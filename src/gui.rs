@@ -1178,9 +1178,10 @@ impl SettingsGui {
                 ui.label(egui::RichText::new(status).size(12.5).color(theme::ACCENT));
                 ui.label(
                     egui::RichText::new(
-                        "Black bars are found by their sharp edge, so no brightness setting is needed. The depth adapts between \
-                         10% and 20%: shallow and precise for smooth video, deeper and steadier for busy edges such as game HUDs \
-                         and web pages. Switch to Manual, or drag a strip's edge in the picture, to set it yourself.",
+                        "Black bars are found by their sharp edge, so no brightness setting is needed. The depth tunes itself \
+                         every moment (8% to 24%): it compares the edge at several depths and uses the shallowest one that \
+                         gives a steady colour, so smooth video follows the very edge while game HUDs and web pages get a \
+                         deeper, steadier strip. Switch to Manual, or drag a strip's edge in the picture, to set it yourself.",
                     )
                     .size(11.5)
                     .color(theme::MUTED),

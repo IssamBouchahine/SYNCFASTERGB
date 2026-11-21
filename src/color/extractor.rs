@@ -217,26 +217,35 @@ fn detect_bars_edge(f: &Frame) -> (usize, usize, usize, usize) {
     (top, bottom, left, right)
 }
 
-/// How busy the picture edge is: mean absolute difference between neighbouring strip segments
-/// (0 = perfectly smooth, large for game HUDs, text and web pages).
-fn edge_busyness(s: &EdgeSamples) -> f32 {
-    let strip = |v: &Vec<[u8; 3]>| -> (f32, usize) {
-        let d: f32 = v
-            .windows(2)
-            .map(|w| {
-                ((w[0][0] as f32 - w[1][0] as f32).abs()
-                    + (w[0][1] as f32 - w[1][1] as f32).abs()
-                    + (w[0][2] as f32 - w[1][2] as f32).abs())
-                    / 3.0
-            })
-            .sum();
-        (d, v.len().saturating_sub(1))
-    };
-    let (mut sum, mut n) = (0.0, 0usize);
-    for v in [&s.top, &s.bottom, &s.left, &s.right] {
-        let (d, c) = strip(v);
-        sum += d;
-        n += c;
+/// Depths (percent of the screen) the automatic mode compares each frame, shallowest first.
+pub const PROBE_DEPTHS: [u8; 6] = [5, 8, 11, 15, 20, 26];
+
+/// The automatic depth never goes below this (the very rim of a screen is often a thin dark or
+/// bright line that is not picture) ...
+const AUTO_DEPTH_MIN: f32 = 8.0;
+/// ... and never beyond this (deeper averages away the edge the LEDs are meant to follow).
+const AUTO_DEPTH_MAX: f32 = 24.0;
+
+/// A strip is "settled" at some depth when going deeper changes its colours by less than this
+/// (mean difference per colour channel, out of 255).
+const SETTLED_DIFF: f32 = 6.0;
+
+/// Mean difference per colour channel (0..=255) between two sets of strip colours taken at the
+/// same segments but at different depths.
+fn samples_distance(a: &EdgeSamples, b: &EdgeSamples) -> f32 {
+    let (mut sum, mut n) = (0.0f32, 0usize);
+    for (x, y) in [
+        (&a.top, &b.top),
+        (&a.bottom, &b.bottom),
+        (&a.left, &b.left),
+        (&a.right, &b.right),
+    ] {
+        for (p, q) in x.iter().zip(y.iter()) {
+            for k in 0..3 {
+                sum += (p[k] as f32 - q[k] as f32).abs();
+                n += 1;
+            }
+        }
     }
     if n == 0 {
         0.0
@@ -245,13 +254,28 @@ fn edge_busyness(s: &EdgeSamples) -> f32 {
     }
 }
 
-/// Automatic depth in percent: shallow and precise for smooth video, deeper and steadier for
-/// busy edges. Always between 10% and 20%.
-pub fn auto_depth_target(busyness: f32) -> f32 {
-    if !busyness.is_finite() {
-        return 10.0;
+/// Automatic depth from the picture itself. `scales` holds the strip colours at each of
+/// `PROBE_DEPTHS`. The depth is the shallowest one from which the colours stop changing: where
+/// the edge is smooth (video, a gradient, flat colour) that is shallow and follows the very edge;
+/// where it keeps changing (a game's HUD, text, a web page) it is deeper, because only a deeper
+/// strip gives a steady colour. Always between `AUTO_DEPTH_MIN` and `AUTO_DEPTH_MAX`.
+pub fn auto_depth_from_scales(scales: &[EdgeSamples]) -> f32 {
+    let n = scales.len().min(PROBE_DEPTHS.len());
+    if n < 2 {
+        return 12.0;
     }
-    10.0 + 10.0 * ((busyness - 6.0) / 30.0).clamp(0.0, 1.0)
+    let diff: Vec<f32> = (0..n - 1)
+        .map(|i| samples_distance(&scales[i], &scales[i + 1]))
+        .collect();
+    // settled at i: going from depth i to i+1 (and on to i+2, when there is one) barely changes it
+    let settled = (0..diff.len()).find(|&i| {
+        diff[i] < SETTLED_DIFF && diff.get(i + 1).is_none_or(|&next| next < SETTLED_DIFF)
+    });
+    let depth = match settled {
+        Some(i) => PROBE_DEPTHS[i] as f32,
+        None => AUTO_DEPTH_MAX,
+    };
+    depth.clamp(AUTO_DEPTH_MIN, AUTO_DEPTH_MAX)
 }
 
 /// Move the automatic depth toward its target with a 1.5 s time constant, so it never jumps.
@@ -414,17 +438,31 @@ fn edge_colors(f: &Frame, p: &EdgeParams, bars: (usize, usize, usize, usize)) ->
     out
 }
 
-/// Nearest-neighbour map of the strip colors onto `lamp_count` LEDs.
+/// Map the strip colors onto `lamp_count` LEDs. Each LED sits at its own position along the
+/// border and blends the two nearest segments by distance, so a colour that moves along the edge
+/// glides from LED to LED instead of stepping a whole segment at a time (and two LEDs that share
+/// a segment do not show a hard step between them).
 fn map_to_leds(border_colors: &[Rgb], lamp_count: u32) -> Vec<Rgb> {
     if border_colors.is_empty() || lamp_count == 0 {
         return vec![Rgb { r: 0, g: 0, b: 0 }; lamp_count as usize];
     }
+    let last = border_colors.len() - 1;
     let src_len = border_colors.len() as f32;
     let dst_len = lamp_count as f32;
     (0..lamp_count)
         .map(|i| {
-            let src_idx = (i as f32 + 0.5) * src_len / dst_len;
-            border_colors[(src_idx as usize).min(border_colors.len() - 1)]
+            // position in "segment centre" coordinates: 0.0 is the first segment's centre
+            let pos = ((i as f32 + 0.5) * src_len / dst_len - 0.5).clamp(0.0, last as f32);
+            let lo = (pos as usize).min(last);
+            let hi = (lo + 1).min(last);
+            let t = pos - lo as f32;
+            let (a, b) = (border_colors[lo], border_colors[hi]);
+            let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+            Rgb {
+                r: mix(a.r, b.r),
+                g: mix(a.g, b.g),
+                b: mix(a.b, b.b),
+            }
         })
         .collect()
 }
@@ -443,6 +481,8 @@ pub struct ColorExtractor {
     /// Automatic mode: the engine judges bars and depth itself, in real time.
     auto: bool,
     auto_depth: f32,
+    /// Last automatic depth written to the debug log.
+    logged_depth: u8,
 }
 
 impl ColorExtractor {
@@ -473,6 +513,7 @@ impl ColorExtractor {
             bars: (0, 0, 0, 0),
             auto: sync.detect_auto,
             auto_depth: 12.0,
+            logged_depth: 0,
         }
     }
 
@@ -527,20 +568,29 @@ impl ColorExtractor {
         let mut p = self.params;
         p.skip_black_bars = skip;
         if self.auto {
-            // measure how busy the edge is at a fixed reference depth, then ease toward the target
-            let mut probe = p;
-            probe.depth_pct = 10;
-            let (_, s) = sample_edges(
-                data,
-                pitch as usize,
-                width as usize,
-                height as usize,
-                &probe,
-                self.bars,
-            );
-            self.auto_depth =
-                smooth_depth(self.auto_depth, auto_depth_target(edge_busyness(&s)), dt_ms);
+            // compare the strip at several depths and ease toward the shallowest settled one
+            let scales: Vec<EdgeSamples> = PROBE_DEPTHS
+                .iter()
+                .map(|&d| {
+                    let mut probe = p;
+                    probe.depth_pct = d;
+                    sample_edges(
+                        data,
+                        pitch as usize,
+                        width as usize,
+                        height as usize,
+                        &probe,
+                        self.bars,
+                    )
+                    .1
+                })
+                .collect();
+            self.auto_depth = smooth_depth(self.auto_depth, auto_depth_from_scales(&scales), dt_ms);
             p.depth_pct = self.auto_depth.round().clamp(3.0, 40.0) as u8;
+            if p.depth_pct != self.logged_depth {
+                self.logged_depth = p.depth_pct;
+                log::debug!("automatic depth: {}%", p.depth_pct);
+            }
         }
 
         let border = edge_colors(&frame, &p, self.bars);
@@ -965,51 +1015,112 @@ mod tests {
         );
     }
 
+    /// The depth automatic mode picks for a synthetic 160x90 picture.
+    fn auto_depth_of(paint: impl Fn(usize, usize) -> (u8, u8, u8)) -> f32 {
+        let d = frame(160, 90, paint);
+        let f = view(&d, 160, 90);
+        let scales: Vec<EdgeSamples> = PROBE_DEPTHS
+            .iter()
+            .map(|&depth| {
+                let p = params(depth, true);
+                sample_edges(f.data, f.pitch, f.w, f.h, &p, (0, 0, 0, 0)).1
+            })
+            .collect();
+        auto_depth_from_scales(&scales)
+    }
+
     #[test]
-    fn auto_depth_is_shallow_for_smooth_video_and_deep_for_busy_edges() {
-        let p = params(10, true);
-        let busy_of = |d: &[u8]| {
-            let f = view(d, 160, 90);
-            let (_, s) = sample_edges(f.data, f.pitch, f.w, f.h, &p, (0, 0, 0, 0));
-            edge_busyness(&s)
-        };
-        let smooth = frame(160, 90, |_, y| (40 + (y * 2) as u8, 90, 200 - y as u8)); // vertical gradient video
-        let flat = frame(160, 90, |_, _| (90, 140, 200));
-        // game HUD / text / web page: strongly varying colours along the edge
-        let busy = frame(160, 90, |x, y| {
+    fn auto_depth_is_shallow_where_the_edge_is_smooth() {
+        // flat colour, a gradient and video grain: going deeper changes nothing, so it follows
+        // the very edge (the shallowest allowed depth)
+        let flat = auto_depth_of(|_, _| (90, 140, 200));
+        let gradient = auto_depth_of(|_, y| (40 + (y * 2) as u8, 90, 200 - y as u8));
+        let grain = auto_depth_of(|x, y| {
+            let n = ((x * 7919 + y * 104729) % 7) as i32 - 3;
+            let v = (120 + n) as u8;
+            (v, v, v)
+        });
+        for (name, d) in [("flat", flat), ("gradient", gradient), ("grain", grain)] {
+            assert_eq!(d, AUTO_DEPTH_MIN, "{name} edge settles at once: {d}");
+        }
+    }
+
+    #[test]
+    fn auto_depth_is_deep_where_the_edge_keeps_changing() {
+        // game HUD blocks, text and a fine texture: the colours keep changing with depth, so
+        // only a deeper strip is steady
+        let blocks = auto_depth_of(|x, y| {
             if ((x / 10) + (y / 10)) % 2 == 0 {
                 (240, 240, 240)
             } else {
                 (20, 30, 120)
             }
         });
-        // fine texture that the LED segments average out: busier than video, not as busy as HUD blocks
-        let fine = frame(160, 90, |x, y| {
+        let fine = auto_depth_of(|x, y| {
             if ((x / 5) + (y / 5)) % 2 == 0 {
                 (240, 240, 240)
             } else {
                 (20, 30, 120)
             }
         });
-        let (ds, df, db) = (
-            auto_depth_target(busy_of(&smooth)),
-            auto_depth_target(busy_of(&flat)),
-            auto_depth_target(busy_of(&busy)),
-        );
-        let dfine = auto_depth_target(busy_of(&fine));
+        assert!(blocks >= 15.0, "HUD blocks go deep: {blocks}");
+        assert!(fine >= 15.0, "fine texture goes deep: {fine}");
+        assert!(blocks <= AUTO_DEPTH_MAX && fine <= AUTO_DEPTH_MAX);
+    }
+
+    #[test]
+    fn auto_depth_ignores_a_thin_rim_and_a_distant_object() {
+        // a one-line bright rim at the very screen edge is not picture
+        let rim = auto_depth_of(|x, y| {
+            if y == 0 || x == 0 || x == 159 {
+                (250, 250, 250)
+            } else {
+                (60, 90, 160)
+            }
+        });
+        assert!(rim <= 12.0, "a thin rim settles quickly: {rim}");
+        // a bright object in the middle of the picture is far from the edge strips
+        let mid = auto_depth_of(|x, y| {
+            if (50..110).contains(&x) && (30..60).contains(&y) {
+                (250, 250, 250)
+            } else {
+                (60, 90, 160)
+            }
+        });
         assert!(
-            ds <= 11.0 && df <= 11.0,
-            "smooth edges stay shallow: {ds} {df}"
+            mid <= 20.0,
+            "an object in the middle does not push the depth: {mid}"
         );
-        assert!(db >= 19.0, "busy edges go deep: {db}");
-        assert!(
-            dfine > ds + 5.0 && dfine <= db,
-            "fine texture lands in between: {dfine}"
+    }
+
+    #[test]
+    fn auto_depth_is_always_within_its_limits() {
+        // degenerate input never panics and never leaves the allowed range
+        assert_eq!(auto_depth_from_scales(&[]), 12.0);
+        let one = vec![EdgeSamples {
+            top: vec![[1, 2, 3]],
+            bottom: vec![],
+            left: vec![],
+            right: vec![],
+        }];
+        assert_eq!(auto_depth_from_scales(&one), 12.0);
+        let wild: Vec<EdgeSamples> = (0..PROBE_DEPTHS.len())
+            .map(|i| {
+                let v = if i % 2 == 0 { 0u8 } else { 255u8 };
+                EdgeSamples {
+                    top: vec![[v; 3]; 4],
+                    bottom: vec![[v; 3]; 4],
+                    left: vec![[v; 3]; 4],
+                    right: vec![[v; 3]; 4],
+                }
+            })
+            .collect();
+        assert_eq!(auto_depth_from_scales(&wild), AUTO_DEPTH_MAX);
+        assert_eq!(
+            samples_distance(&wild[0], &wild[0]),
+            0.0,
+            "identical samples are at distance 0"
         );
-        for d in [ds, df, db] {
-            assert!((10.0..=20.0).contains(&d));
-        }
-        assert_eq!(auto_depth_target(f32::NAN), 10.0);
     }
 
     #[test]
@@ -1054,7 +1165,7 @@ mod tests {
             out.iter().any(|c| c[0] > 100.0),
             "LEDs carry the picture colour, not black"
         );
-        assert!((10..=20).contains(&ex.effective_depth()));
+        assert!((8..=24).contains(&ex.effective_depth()));
         // manual mode with the sliders keeps working
         let manual = SyncConfig {
             detect_auto: false,
@@ -1257,5 +1368,30 @@ old behaviour (skipping off, depth 12): black {:.1}  lifted {:.1}  grey24 {:.1}"
         assert_eq!(map_to_leds(&src, 71).len(), 71);
         assert_eq!(map_to_leds(&[], 5), vec![Rgb { r: 0, g: 0, b: 0 }; 5]);
         assert!(map_to_leds(&src, 0).is_empty());
+    }
+
+    #[test]
+    fn map_to_leds_glides_between_segments() {
+        let px = |v: u8| Rgb { r: v, g: v, b: v };
+        // a flat colour stays exactly that colour
+        assert!(map_to_leds(&[px(77); 20], 71).iter().all(|c| *c == px(77)));
+        // a hard step between two segments becomes a ramp over several LEDs
+        let mut src = vec![px(0); 10];
+        src.extend(vec![px(200); 10]);
+        let out = map_to_leds(&src, 71);
+        let steps: Vec<i32> = out
+            .windows(2)
+            .map(|w| (w[1].r as i32 - w[0].r as i32).abs())
+            .collect();
+        assert!(
+            *steps.iter().max().unwrap() <= 60,
+            "no single LED-to-LED jump of the whole step: {steps:?}"
+        );
+        // values stay between the neighbours and keep their order along the strip
+        assert!(out.windows(2).all(|w| w[1].r >= w[0].r));
+        assert_eq!((out[0], out[70]), (px(0), px(200)));
+        // one LED per segment keeps every segment's colour
+        let ramp: Vec<Rgb> = (0..8).map(|i| px(i * 30)).collect();
+        assert_eq!(map_to_leds(&ramp, 8), ramp);
     }
 }

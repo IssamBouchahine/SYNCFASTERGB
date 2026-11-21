@@ -115,8 +115,8 @@ pub struct SyncConfig {
     /// `light_compression` is on). Highlights can reach full brightness; only the total is capped.
     #[serde(default = "default_power_limit_pct")]
     pub power_limit_pct: u8,
-    /// Judge the screen in real time: bars are found by their edge and the depth adapts between
-    /// 10% and 20%. When off, `edge_depth_pct`, `skip_black_bars` and `black_level` apply.
+    /// Judge the screen in real time: bars are found by their edge and the depth tunes itself
+    /// (8% to 24%). When off, `edge_depth_pct`, `skip_black_bars` and `black_level` apply.
     #[serde(default = "default_true")]
     pub detect_auto: bool,
     /// How far in from each screen edge the LEDs look, in percent of the screen size (manual).
