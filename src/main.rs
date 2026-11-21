@@ -128,7 +128,7 @@ fn main() {
         device_released.clone(),
     );
 
-    let (tx, rx) = mpsc::sync_channel::<Vec<pipeline::Led>>(2);
+    let (tx, rx) = mpsc::sync_channel::<Vec<[u8; 3]>>(2);
 
     let capture_thread = {
         let running = running.clone();
@@ -211,7 +211,7 @@ fn capture_loop(
     running: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
     config_version: Arc<AtomicU32>,
-    tx: mpsc::SyncSender<Vec<pipeline::Led>>,
+    tx: mpsc::SyncSender<Vec<[u8; 3]>>,
     screen_black: Arc<AtomicBool>,
 ) {
     let mut frame_interval = Duration::from_millis(1000 / config.capture.fps as u64);
@@ -275,14 +275,15 @@ fn capture_loop(
     let mut black_threshold_frames = config.capture.fps; // about 1 second
                                                          // Consecutive error counter (re-creates capture when it piles up)
     let mut consecutive_errors = 0u32;
-    // Last send (lets smoothing settle on a still screen, and drives the keepalive)
-    let mut last_sent: Option<Vec<pipeline::Led>> = None;
-    let mut last_send_at = Instant::now();
-    const KEEPALIVE: Duration = Duration::from_millis(500);
+    // Last target handed to the strip's sender: identical targets are not sent again (the sender
+    // keeps the newest one and runs the smoothing on its own steady clock).
+    let mut last_sent: Option<Vec<[u8; 3]>> = None;
     // Performance statistics (debug log only)
     let mut stat_cap = Duration::ZERO;
     let mut stat_ext = Duration::ZERO;
     let mut stat_frames = 0u32;
+    let mut stat_timeouts = 0u32;
+    let mut stat_dropped = 0u32;
     let mut stat_since = Instant::now();
     // Access loss (exclusive full-screen games, secure desktop) can repeat every second: only the start and the recovery are logged
     // (one earlier log grew to 7.5 MB with 19,355 repeats over 5 hours)
@@ -466,11 +467,11 @@ fn capture_loop(
                 }
 
                 // Black screen detection: are all LED colors nearly black?
-                const BLACK_SUM_THRESHOLD: f32 = 15.0;
+                const BLACK_SUM_THRESHOLD: u32 = 15;
                 if turn_off_on_black {
                     let is_black = colors
                         .iter()
-                        .all(|c| c[0] + c[1] + c[2] < BLACK_SUM_THRESHOLD);
+                        .all(|c| (c[0] as u32 + c[1] as u32 + c[2] as u32) < BLACK_SUM_THRESHOLD);
                     if is_black {
                         black_frame_count = black_frame_count.saturating_add(1);
                     } else {
@@ -494,25 +495,27 @@ fn capture_loop(
                     black_frame_count = 0;
                 }
 
-                // Identical colors are not re-sent (saves USB traffic and CPU); a keepalive
-                // still goes out every 500 ms so the strip never goes quiet.
-                if last_sent.as_ref() != Some(&colors) || last_send_at.elapsed() >= KEEPALIVE {
-                    last_sent = Some(colors.clone());
-                    last_send_at = Instant::now();
-                    let _ = tx.try_send(colors);
+                // Identical targets are not sent again. A target that could not be handed over
+                // (the sender is busy) stays unsent and is offered again with the next frame.
+                if last_sent.as_ref() != Some(&colors) {
+                    match tx.try_send(colors.clone()) {
+                        Ok(()) => last_sent = Some(colors),
+                        Err(_) => stat_dropped += 1,
+                    }
                 }
             }
             Err(CaptureError::Timeout) => {
+                stat_timeouts += 1;
                 dead_since = None; // a timeout just means the screen is static
-                                   // Static screen: keep smoothing converging, and send a keepalive.
                                    // The newest change may still be waiting in the GPU readback: take it now.
                 let fresh = cap.flush_pending();
                 if let Some(f) = fresh.as_ref().or_else(|| cap.last_frame()) {
                     let colors = extractor.extract(&f.data, f.pitch, f.width, f.height);
-                    if last_sent.as_ref() != Some(&colors) || last_send_at.elapsed() >= KEEPALIVE {
-                        last_sent = Some(colors.clone());
-                        last_send_at = Instant::now();
-                        let _ = tx.try_send(colors);
+                    if last_sent.as_ref() != Some(&colors) {
+                        match tx.try_send(colors.clone()) {
+                            Ok(()) => last_sent = Some(colors),
+                            Err(_) => stat_dropped += 1,
+                        }
                     }
                 }
             }
@@ -572,8 +575,10 @@ fn capture_loop(
         if stat_since.elapsed() >= Duration::from_secs(10) {
             if stat_frames > 0 {
                 log::debug!(
-                    "perf: {} frames/10s, capture {:.2} ms/frame, extract {:.3} ms/frame",
+                    "perf: {} frames + {} timeouts per 10 s, {} dropped before the strip, capture {:.2} ms/frame, extract {:.3} ms/frame",
                     stat_frames,
+                    stat_timeouts,
+                    stat_dropped,
                     stat_cap.as_secs_f64() * 1000.0 / stat_frames as f64,
                     stat_ext.as_secs_f64() * 1000.0 / stat_frames as f64,
                 );
@@ -581,6 +586,8 @@ fn capture_loop(
             stat_cap = Duration::ZERO;
             stat_ext = Duration::ZERO;
             stat_frames = 0;
+            stat_timeouts = 0;
+            stat_dropped = 0;
             stat_since = Instant::now();
         }
 
@@ -718,7 +725,7 @@ fn sender_loop(
     config: Config,
     running: Arc<AtomicBool>,
     config_version: Arc<AtomicU32>,
-    rx: mpsc::Receiver<Vec<pipeline::Led>>,
+    rx: mpsc::Receiver<Vec<[u8; 3]>>,
     monitor_off: Arc<AtomicBool>,
     screen_black: Arc<AtomicBool>,
     suspend_pending: Arc<AtomicBool>,
@@ -733,6 +740,21 @@ fn sender_loop(
     let mut led_share = ipc::LedShare::create();
     // Rounds the graded colours to the strip's 8-bit levels, dithering over time while they fade
     let mut dither = pipeline::Dither::new();
+    // Smoothing over time runs here, on the sender's own steady clock (not whenever a screen frame
+    // happens to arrive), so the strip is updated at an even rate with an exact time step.
+    let mut smoother = pipeline::Smoother::new(
+        config.sync.attack_ms,
+        config.sync.decay_ms,
+        config.sync.deadband,
+    );
+    let mut smoothing = config.sync.smoothing;
+    // The newest colours the screen asked for, one per LED
+    let mut target: Option<Vec<[u8; 3]>> = None;
+    let mut last_tick: Option<Instant> = None;
+    // What the strip shows now, and when it was last written (a keepalive every 500 ms)
+    let mut last_out: Option<Vec<[u8; 3]>> = None;
+    let mut last_tx_at = Instant::now();
+    const KEEPALIVE: Duration = Duration::from_millis(500);
     // Brownout guard: if the strip keeps dropping off the bus while drawing a lot of power,
     // that looks like the USB port tripping its overcurrent protection. Lower our own
     // budget for the rest of the session instead of asking for the same power again.
@@ -760,6 +782,9 @@ fn sender_loop(
     let mut stat_sends = 0u32;
     let mut stat_write = Duration::ZERO;
     let mut stat_write_max = Duration::ZERO;
+    let mut stat_gap_max = Duration::ZERO;
+    let mut stat_late = 0u32;
+    let mut last_write_at: Option<Instant> = None;
     let mut stat_since = Instant::now();
     let mut blanked_by_screen = false;
 
@@ -858,6 +883,10 @@ fn sender_loop(
             in_use = c.clone();
             wire_map = WireMap::from_str(&c.device.wire_map);
             send_interval = Duration::from_millis(c.sync.interval_ms());
+            smoothing = c.sync.smoothing;
+            smoother.attack_ms = c.sync.attack_ms;
+            smoother.decay_ms = c.sync.decay_ms;
+            smoother.deadband = c.sync.deadband;
             grade_params = grade_from_config(&c.sync);
             power_limit = power_from_config(&c.sync);
 
@@ -934,21 +963,48 @@ fn sender_loop(
         }
 
         if current_mode == LedMode::Sync {
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(colors) => {
-                    let mut graded: Vec<pipeline::Led> = colors
-                        .iter()
-                        .map(|&c| pipeline::grade(c, &grade_params))
-                        .collect();
-                    if let Some(fraction) = effective_power_limit(power_limit, derate) {
-                        pipeline::limit_total_power(&mut graded, fraction);
+            // the newest screen colours win; older ones that piled up are dropped
+            loop {
+                match rx.try_recv() {
+                    Ok(colors) => target = Some(colors),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        running.store(false, Ordering::SeqCst);
+                        break;
                     }
-                    let last_draw = pipeline::power_fraction(&graded);
-                    // the one rounding in the whole chain, with temporal dithering while fading
-                    let graded = dither.apply(&graded);
-                    if let Some(share) = led_share.as_mut() {
-                        share.publish(&graded);
-                    }
+                }
+            }
+            let tick_at = Instant::now();
+            let dt_ms = last_tick
+                .map(|t| tick_at.duration_since(t).as_secs_f32() * 1000.0)
+                .unwrap_or(16.0);
+            last_tick = Some(tick_at);
+            if let Some(tgt) = target.as_ref() {
+                // one smoothing step, exactly as long as the time since the last one
+                let smoothed: Vec<pipeline::Led> = if smoothing {
+                    smoother.update(tgt, dt_ms)
+                } else {
+                    tgt.iter()
+                        .map(|c| [c[0] as f32, c[1] as f32, c[2] as f32])
+                        .collect()
+                };
+                let mut graded: Vec<pipeline::Led> = smoothed
+                    .iter()
+                    .map(|&c| pipeline::grade(c, &grade_params))
+                    .collect();
+                if let Some(fraction) = effective_power_limit(power_limit, derate) {
+                    pipeline::limit_total_power(&mut graded, fraction);
+                }
+                let last_draw = pipeline::power_fraction(&graded);
+                // the one rounding in the whole chain, with temporal dithering while fading
+                let graded = dither.apply(&graded);
+                if let Some(share) = led_share.as_mut() {
+                    share.publish(&graded);
+                }
+                // an unchanged picture is not written again (USB traffic), except as a keepalive
+                let unchanged =
+                    last_out.as_ref() == Some(&graded) && last_tx_at.elapsed() < KEEPALIVE;
+                if !unchanged {
                     let mut color_data = Vec::with_capacity(graded.len() * 5);
                     for (i, g) in graded.iter().enumerate() {
                         let wired = wire_map.apply(g[0], g[1], g[2]);
@@ -970,6 +1026,14 @@ fn sender_loop(
                     send_count += 1;
 
                     let t_write = Instant::now();
+                    if let Some(prev) = last_write_at {
+                        let gap = t_write.duration_since(prev);
+                        stat_gap_max = stat_gap_max.max(gap);
+                        if gap > Duration::from_millis(40) {
+                            stat_late += 1;
+                        }
+                    }
+                    last_write_at = Some(t_write);
                     let sent = d.set_sync_screen(&color_data);
                     let took = t_write.elapsed();
                     stat_sends += 1;
@@ -977,17 +1041,23 @@ fn sender_loop(
                     stat_write_max = stat_write_max.max(took);
                     if stat_since.elapsed() >= Duration::from_secs(5) {
                         log::debug!(
-                            "strip updates: {:.1}/s, write {:.2} ms avg / {:.2} ms max",
+                            "strip updates: {:.1}/s, write {:.2} ms avg / {:.2} ms max, longest gap {:.0} ms, {} gaps over 40 ms",
                             stat_sends as f64 / stat_since.elapsed().as_secs_f64(),
                             stat_write.as_secs_f64() * 1000.0 / stat_sends.max(1) as f64,
-                            stat_write_max.as_secs_f64() * 1000.0
+                            stat_write_max.as_secs_f64() * 1000.0,
+                            stat_gap_max.as_secs_f64() * 1000.0,
+                            stat_late
                         );
+                        stat_gap_max = Duration::ZERO;
+                        stat_late = 0;
                         stat_sends = 0;
                         stat_write = Duration::ZERO;
                         stat_write_max = Duration::ZERO;
                         stat_since = Instant::now();
                     }
                     if let Err(e) = sent {
+                        // the strip did not get this picture: offer it again at the next tick
+                        last_out = None;
                         if device::serial::classify_error(e.as_ref())
                             == device::serial::WriteFailure::Gone
                             && last_draw > 0.3
@@ -1014,9 +1084,9 @@ fn sender_loop(
                         );
                         continue;
                     }
+                    last_out = Some(graded);
+                    last_tx_at = Instant::now();
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         } else if current_mode == LedMode::Sound
             && effect_cfg.rhythm_source == RhythmSource::Computer

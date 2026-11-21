@@ -13,6 +13,16 @@ pub type Led = [f32; 3];
 const MOVING_GAP: f32 = 2.0;
 /// Time constant (ms) over which the gap to the target is averaged.
 const GAP_AVERAGE_MS: f32 = 200.0;
+/// A slow fade of the whole scene keeps each LED only a fraction of a level behind its target,
+/// far less than the noise on a single LED. But the average state of all LEDs, per colour channel,
+/// shows a fade plainly when compared with where it was `FADE_WINDOW_MS` ago: a change of at least
+/// `FADE_ON` levels (until it is back under `FADE_OFF`) means the channel is fading, and every LED
+/// whose own gap leans the same way, by at least `FADE_LOCAL_MIN`, is passed on unrounded and
+/// dithered instead of being held in the still-picture band.
+const FADE_WINDOW_MS: f32 = 1000.0;
+const FADE_ON: f32 = 1.5;
+const FADE_OFF: f32 = 0.8;
+const FADE_LOCAL_MIN: f32 = 0.08;
 
 /// Temporal smoother: per-LED exponential smoothing with a fast attack (getting
 /// brighter) and a slower decay (getting darker), frame-rate independent.
@@ -27,6 +37,12 @@ pub struct Smoother {
     out: Vec<Led>,
     /// Averaged signed gap between target and state of each channel, in levels.
     gap: Vec<Led>,
+    /// Running time (ms) and the average state of all LEDs, per channel, over the last
+    /// `FADE_WINDOW_MS` (see `FADE_ON`).
+    clock: f32,
+    history: std::collections::VecDeque<(f32, [f32; 3])>,
+    /// Direction of a scene-wide fade in each channel: 1 rising, -1 falling, 0 none.
+    fade: [i8; 3],
     pub attack_ms: f32,
     pub decay_ms: f32,
     /// Output hysteresis in 0..255 steps for a channel that holds still; kills 1-step shimmer.
@@ -64,6 +80,9 @@ impl Smoother {
             state: Vec::new(),
             out: Vec::new(),
             gap: Vec::new(),
+            clock: 0.0,
+            history: std::collections::VecDeque::new(),
+            fade: [0; 3],
             attack_ms,
             decay_ms,
             deadband,
@@ -71,11 +90,10 @@ impl Smoother {
         }
     }
 
-    pub fn reset(&mut self) {
-        self.stage.clear();
-        self.state.clear();
-        self.out.clear();
-        self.gap.clear();
+    fn clear_fade(&mut self) {
+        self.clock = 0.0;
+        self.history.clear();
+        self.fade = [0; 3];
     }
 
     /// Advance by `dt_ms` toward `target` and return the LED colors to display.
@@ -92,6 +110,7 @@ impl Smoother {
             self.stage = self.state.clone();
             self.out = self.state.clone();
             self.gap = vec![[0.0; 3]; target.len()];
+            self.clear_fade();
             return self.out.clone();
         }
 
@@ -109,6 +128,7 @@ impl Smoother {
                 self.stage = self.state.clone();
                 self.out = self.state.clone();
                 self.gap = vec![[0.0; 3]; target.len()];
+                self.clear_fade();
                 return self.out.clone();
             }
         }
@@ -152,7 +172,51 @@ impl Smoother {
                 self.state[i][k] = t[k] - n2;
                 let s = self.state[i][k];
                 self.gap[i][k] += ((t[k] - s) - self.gap[i][k]) * gap_alpha;
-                let moving = self.gap[i][k].abs() > MOVING_GAP;
+            }
+        }
+
+        // is the whole scene fading in some channel? (average state over all LEDs, now against
+        // a second ago)
+        self.clock += dt;
+        let n = target.len().max(1) as f32;
+        let mut mean = [0.0f32; 3];
+        for st in &self.state {
+            for k in 0..3 {
+                mean[k] += st[k] / n;
+            }
+        }
+        self.history.push_back((self.clock, mean));
+        // keep the newest entry that is at least a window old, drop everything older than that
+        while self.history.len() > 1 && self.history[1].0 <= self.clock - FADE_WINDOW_MS {
+            self.history.pop_front();
+        }
+        if let Some(&(t0, old)) = self.history.front() {
+            if self.clock - t0 >= FADE_WINDOW_MS * 0.9 {
+                for k in 0..3 {
+                    let change = mean[k] - old[k];
+                    let limit = if self.fade[k] != 0 { FADE_OFF } else { FADE_ON };
+                    self.fade[k] = if change.abs() > limit {
+                        if change > 0.0 {
+                            1
+                        } else {
+                            -1
+                        }
+                    } else {
+                        0
+                    };
+                }
+            }
+        }
+
+        for i in 0..target.len() {
+            for k in 0..3 {
+                let s = self.state[i][k];
+                let gap = self.gap[i][k];
+                // moving: far behind its target, or part of a scene-wide fade in the same direction
+                let moving = gap.abs() > MOVING_GAP
+                    || (self.fade[k] != 0
+                        && gap.abs() > FADE_LOCAL_MIN
+                        && (gap > 0.0) == (self.fade[k] > 0));
                 let want = s.round().clamp(0.0, 255.0);
                 let held = self.out[i][k];
                 if moving {
@@ -844,6 +908,166 @@ mod tests {
         // and the average delay stays about the time constant
         let t63 = v.iter().position(|&x| x >= 63.2).unwrap() as f32 * 16.0;
         assert!((40.0..140.0).contains(&t63), "reaches 63% after {t63} ms");
+    }
+
+    /// The grade the app builds from the default settings (what the user runs).
+    fn app_grade() -> Grade {
+        let s = crate::config::SyncConfig::default();
+        Grade {
+            saturation_gain: s.saturation,
+            gamma: s.match_gamma,
+            brightness: s.brightness as f32 / 255.0,
+            accurate: s.accurate_color,
+            vibrance: s.display_vibrance_pct as f32 / 100.0,
+            matrix: led_matrix(s.led_green, s.led_blue),
+            led_match: s.led_match_pct as f32 / 100.0,
+            colour_gamma: s.colour_curve,
+            dark_extra: s.dark_curve_extra,
+            dark_level: s.dark_level_extra,
+            gains: [
+                s.balance_r as f32 / 100.0,
+                s.balance_g as f32 / 100.0,
+                s.balance_b as f32 / 100.0,
+            ],
+            ..Grade::default()
+        }
+    }
+
+    /// A colour fades linearly (in the screen's own values) between black and `colour` over
+    /// `seconds`, through the whole chain at 60 steps a second: smoothing, grade, power limit and
+    /// dithering. `fade_in` runs it from black up. Returns the strip's levels per frame (all three
+    /// channels) and the exact levels before the rounding to 8 bits.
+    fn run_colour_fade(colour: [u8; 3], seconds: f32, fade_in: bool) -> (Vec<[i32; 3]>, Vec<Led>) {
+        let g = app_grade();
+        let mut s = Smoother::new(40.0, 250.0, 2.0);
+        let mut d = Dither::new();
+        let frames = (seconds * 60.0) as usize;
+        let start = if fade_in { [0, 0, 0] } else { colour };
+        s.update(&solid(71, start), 16.7);
+        let mut out = Vec::new();
+        let mut exact = Vec::new();
+        for n in 0..frames + 120 {
+            let f = (n as f32 / frames as f32).min(1.0);
+            let f = if fade_in { f } else { 1.0 - f };
+            let t = colour.map(|c| (c as f32 * f).round() as u8);
+            let smoothed = s.update(&solid(71, t), 16.7);
+            let mut graded: Vec<Led> = smoothed.iter().map(|&c| grade(c, &g)).collect();
+            limit_total_power(&mut graded, 0.4);
+            exact.push(graded[5]);
+            let o = d.apply(&graded)[5];
+            out.push([o[0] as i32, o[1] as i32, o[2] as i32]);
+        }
+        (out, exact)
+    }
+
+    #[test]
+    fn fades_to_and_from_black_are_smooth_through_the_whole_chain() {
+        let colours: [(&str, [u8; 3]); 4] = [
+            ("warm white", [235, 225, 210]),
+            ("orange", [230, 140, 70]),
+            ("red", [200, 20, 20]),
+            ("blue", [60, 90, 200]),
+        ];
+        for (name, colour) in colours {
+            for seconds in [2.0, 6.0, 30.0, 60.0] {
+                for fade_in in [false, true] {
+                    let (run, exact) = run_colour_fade(colour, seconds, fade_in);
+                    let what = format!(
+                        "{name} fading {} black over {seconds} s",
+                        if fade_in { "in from" } else { "out to" }
+                    );
+                    // the strongest channel decides what the eye sees
+                    let k = (0..3).max_by_key(|&k| colour[k]).unwrap();
+                    let lv: Vec<i32> = run.iter().map(|r| r[k]).collect();
+                    // 1. black is black at the black end
+                    if fade_in {
+                        assert_eq!(lv[0], 0, "{what}: starts dark");
+                    } else {
+                        assert_eq!(*lv.last().unwrap(), 0, "{what}: ends dark");
+                    }
+                    // 2. smooth in time: what the eye integrates over 6 frames never moves against
+                    //    the fade by more than a level, and no frame jumps by more than 2 levels
+                    let avg: Vec<f32> = lv
+                        .windows(6)
+                        .map(|w| w.iter().sum::<i32>() as f32 / 6.0)
+                        .collect();
+                    let sign = if fade_in { 1.0 } else { -1.0 };
+                    let mut against = 0.0f32;
+                    for i in 12..avg.len() {
+                        against = against.max(-(avg[i] - avg[i - 12]) * sign);
+                    }
+                    assert!(
+                        against <= 1.0,
+                        "{what}: moves against the fade by {against}"
+                    );
+                    let jump = lv.windows(2).map(|p| (p[0] - p[1]).abs()).max().unwrap();
+                    assert!(jump <= 4, "{what}: a frame jumps by {jump} levels");
+                    // 3. true to the exact curve: over 6 frames the strip's average stays within
+                    //    three quarters of a level of the exact value (the dither fills in between
+                    //    the 8-bit levels), so there are no held steps anywhere on the way
+                    let ideal: Vec<f32> = exact.iter().map(|e| e[k]).collect();
+                    let mut worst = 0.0f32;
+                    for i in 0..lv.len() - 5 {
+                        let sent = lv[i..i + 6].iter().sum::<i32>() as f32 / 6.0;
+                        let want = ideal[i..i + 6].iter().sum::<f32>() / 6.0;
+                        worst = worst.max((sent - want).abs());
+                    }
+                    assert!(
+                        worst <= 0.75,
+                        "{what}: strays {worst} levels from the exact curve"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_slow_scene_wide_fade_moves_in_single_levels_never_in_held_jumps() {
+        // Red falls at 5 levels a second while blue rises, green stays: the whole strip fades
+        // together. Each LED stays well under the "moving" gap of its own, yet the output must
+        // not sit still and jump by two levels (the hold band for still pictures): it follows
+        // in single levels, and the channel that does not change stays perfectly still.
+        let mut s = Smoother::new(40.0, 250.0, 2.0);
+        s.cut_threshold = 1.0e9;
+        let mut d = Dither::new();
+        let frames = 8 * 60;
+        let (mut reds, mut greens) = (Vec::new(), Vec::new());
+        s.update(&solid(71, [100, 16, 27]), 16.7);
+        for n in 0..frames {
+            let t = n as f32 / 60.0;
+            let r = (100.0 - 5.0 * t).round() as u8;
+            let b = (27.0 + 2.0 * t).round() as u8;
+            let smoothed = s.update(&solid(71, [r, 16, b]), 16.7);
+            let out = d.apply(&smoothed);
+            reds.push(out[3][0] as i32);
+            greens.push(out[3][1] as i32);
+        }
+        // after the start-up (1 s): never a jump of more than one level between frames
+        let jump = reds[60..]
+            .windows(2)
+            .map(|p| (p[0] - p[1]).abs())
+            .max()
+            .unwrap_or(0);
+        assert!(jump <= 1, "red jumps by {jump} levels between two frames");
+        // and no long holds: at 5 levels a second red changes at least every 16 frames
+        let mut longest = 0;
+        let mut run = 0;
+        for p in reds[60..].windows(2) {
+            if p[0] == p[1] {
+                run += 1;
+                longest = longest.max(run);
+            } else {
+                run = 0;
+            }
+        }
+        assert!(
+            longest <= 10,
+            "red sits still for {longest} frames in a fade"
+        );
+        assert!(
+            greens.iter().all(|&g| g == greens[0]),
+            "the unchanged channel stays still"
+        );
     }
 
     #[test]

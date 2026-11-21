@@ -5,10 +5,9 @@
 //! 3. Order the strip colors along the LED strip (and reverse if configured).
 //! 4. Map them onto the LEDs and smooth over time.
 //!
-//! Everything except `ColorExtractor::extract`'s clock and smoother is a pure function of the
+//! Everything except `ColorExtractor::extract`'s clock is a pure function of the
 //! pixel data, so it is unit-tested on synthetic frames.
 
-use super::pipeline::{Led, Smoother};
 use crate::config::SyncConfig;
 use std::time::Instant;
 
@@ -467,13 +466,12 @@ fn map_to_leds(border_colors: &[Rgb], lamp_count: u32) -> Vec<Rgb> {
         .collect()
 }
 
-/// Color extractor: screen frame -> one smoothed raw RGB per LED.
-/// Grading (saturation, gamma, knee, power limit) happens later, in `pipeline::grade`.
+/// Color extractor: screen frame -> the raw target RGB of every LED.
+/// Smoothing over time runs later, on the strip's own steady clock (`pipeline::Smoother`), and grading
+/// (saturation, gamma, knee, power limit) after that, in `pipeline::grade`.
 pub struct ColorExtractor {
     lamp_count: u32,
     params: EdgeParams,
-    smoothing: bool,
-    smoother: Smoother,
     last_extract: Option<Instant>,
     last_dims: (u32, u32),
     /// Black-bar thickness in use, stabilised over time so detection never flickers.
@@ -506,8 +504,6 @@ impl ColorExtractor {
         Self {
             lamp_count: lamps_amount,
             params: EdgeParams::from_sync(sync),
-            smoothing: sync.smoothing,
-            smoother: Smoother::new(sync.attack_ms, sync.decay_ms, sync.deadband),
             last_extract: None,
             last_dims: (0, 0),
             bars: (0, 0, 0, 0),
@@ -521,21 +517,15 @@ impl ColorExtractor {
     pub fn update_config(&mut self, lamp_count: u32, sync: &SyncConfig) {
         if self.lamp_count != lamp_count {
             self.lamp_count = lamp_count;
-            self.smoother.reset();
         }
         self.params = EdgeParams::from_sync(sync);
         self.auto = sync.detect_auto;
-        self.smoothing = sync.smoothing;
-        self.smoother.attack_ms = sync.attack_ms;
-        self.smoother.decay_ms = sync.decay_ms;
-        self.smoother.deadband = sync.deadband;
     }
 
     /// Extract one color per LED from a BGRA frame.
-    pub fn extract(&mut self, data: &[u8], pitch: u32, width: u32, height: u32) -> Vec<Led> {
+    pub fn extract(&mut self, data: &[u8], pitch: u32, width: u32, height: u32) -> Vec<[u8; 3]> {
         if self.last_dims != (width, height) {
             self.last_dims = (width, height);
-            self.smoother.reset();
             self.bars = (0, 0, 0, 0);
             log::info!("sampling a {}x{} frame", width, height);
         }
@@ -595,15 +585,7 @@ impl ColorExtractor {
 
         let border = edge_colors(&frame, &p, self.bars);
         let mapped = map_to_leds(&border, self.lamp_count);
-        let raw: Vec<[u8; 3]> = mapped.iter().map(|c| [c.r, c.g, c.b]).collect();
-
-        if self.smoothing {
-            self.smoother.update(&raw, dt_ms)
-        } else {
-            raw.iter()
-                .map(|c| [c[0] as f32, c[1] as f32, c[2] as f32])
-                .collect()
-        }
+        mapped.iter().map(|c| [c.r, c.g, c.b]).collect()
     }
 }
 
@@ -1162,7 +1144,7 @@ mod tests {
         }
         assert_eq!(ex.bars(), (8, 8, 0, 0));
         assert!(
-            out.iter().any(|c| c[0] > 100.0),
+            out.iter().any(|c| c[0] > 100),
             "LEDs carry the picture colour, not black"
         );
         assert!((8..=24).contains(&ex.effective_depth()));
