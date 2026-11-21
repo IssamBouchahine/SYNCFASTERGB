@@ -1337,7 +1337,7 @@ impl SettingsGui {
                     "Dark colors: extra curve",
                     &mut self.config.sync.dark_curve_extra,
                     0.0,
-                    3.0,
+                    6.0,
                     "",
                     2,
                 );

@@ -260,16 +260,16 @@ fn default_led_green() -> f32 {
     3.0
 }
 fn default_led_blue() -> f32 {
-    0.28
+    0.30
 }
 fn default_colour_curve() -> f32 {
     2.1
 }
 fn default_dark_curve_extra() -> f32 {
-    1.35
+    3.6
 }
 fn default_dark_level_extra() -> f32 {
-    0.4
+    1.2
 }
 fn default_attack_ms() -> f32 {
     40.0
@@ -380,10 +380,10 @@ impl Config {
         s.display_vibrance_pct = s.display_vibrance_pct.clamp(50, 200);
         s.led_match_pct = s.led_match_pct.min(100);
         s.colour_curve = f(s.colour_curve, 1.6, 2.6, 2.1);
-        s.dark_curve_extra = f(s.dark_curve_extra, 0.0, 3.0, 1.35);
-        s.dark_level_extra = f(s.dark_level_extra, 0.0, 1.5, 0.4);
+        s.dark_curve_extra = f(s.dark_curve_extra, 0.0, 6.0, 3.6);
+        s.dark_level_extra = f(s.dark_level_extra, 0.0, 1.5, 1.2);
         s.led_green = f(s.led_green, 1.0, 3.5, 2.0);
-        s.led_blue = f(s.led_blue, 0.1, 1.0, 0.25);
+        s.led_blue = f(s.led_blue, 0.1, 1.0, 0.3);
         if s.edge_number != 3 && s.edge_number != 4 {
             s.edge_number = 3;
         }
@@ -661,10 +661,10 @@ mod tests {
         );
         assert_eq!(c.sync.display_vibrance_pct, 135);
         assert_eq!(c.sync.led_match_pct, 100);
-        assert_eq!((c.sync.led_green, c.sync.led_blue), (3.0, 0.28));
+        assert_eq!((c.sync.led_green, c.sync.led_blue), (3.0, 0.3));
         assert_eq!(c.sync.colour_curve, 2.1);
-        assert_eq!(c.sync.dark_curve_extra, 1.35);
-        assert_eq!(c.sync.dark_level_extra, 0.4);
+        assert_eq!(c.sync.dark_curve_extra, 3.6);
+        assert_eq!(c.sync.dark_level_extra, 1.2);
         assert_eq!(c.sync.edge_depth_pct, 15);
         assert!(c.sync.skip_black_bars);
         assert_eq!(c.sync.black_level, 26);
