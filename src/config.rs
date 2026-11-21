@@ -559,7 +559,7 @@ impl Default for SyncConfig {
             balance_r: 90,
             balance_g: 90,
             balance_b: default_balance(),
-            display_vibrance_pct: 135,
+            display_vibrance_pct: 140,
             colour_curve: default_colour_curve(),
             dark_curve_extra: default_dark_curve_extra(),
             dark_level_extra: default_dark_level_extra(),
@@ -659,7 +659,7 @@ mod tests {
             (c.sync.balance_r, c.sync.balance_g, c.sync.balance_b),
             (90, 90, 100)
         );
-        assert_eq!(c.sync.display_vibrance_pct, 135);
+        assert_eq!(c.sync.display_vibrance_pct, 140);
         assert_eq!(c.sync.led_match_pct, 100);
         assert_eq!((c.sync.led_green, c.sync.led_blue), (3.0, 0.3));
         assert_eq!(c.sync.colour_curve, 2.1);

@@ -1,6 +1,6 @@
 [package]
 name = "syncfastergb"
-version = "0.3.11"
+version = "0.3.12"
 edition = "2021"
 description = "Lightweight screen-sync ambient lighting for USB HID LED strips"
 
