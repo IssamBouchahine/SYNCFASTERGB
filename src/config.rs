@@ -83,6 +83,17 @@ pub struct SyncConfig {
     pub balance_g: u8,
     #[serde(default = "default_balance")]
     pub balance_b: u8,
+    /// How much of the correction for the strip's LED colours is applied, in percent. The strip's
+    /// green is bluer than the screen's, its red deeper: this mixes in what is needed so greens,
+    /// yellows and whites look like the screen's.
+    #[serde(default = "default_balance")]
+    pub led_match_pct: u8,
+    /// Strength of the strip's green LED relative to its red one (calibration).
+    #[serde(default = "default_led_green")]
+    pub led_green: f32,
+    /// Strength of the strip's blue LED relative to its red one (calibration).
+    #[serde(default = "default_led_blue")]
+    pub led_blue: f32,
     /// How much more (or less) colourful the monitor looks than the captured picture, in percent
     /// (100 = the same). Graphics-driver adjustments such as NVIDIA "Digital vibrance" happen
     /// after the picture is captured, so the app cannot see them; this compensates.
@@ -228,6 +239,12 @@ fn default_match_gamma() -> f32 {
 fn default_balance() -> u8 {
     100
 }
+fn default_led_green() -> f32 {
+    2.0
+}
+fn default_led_blue() -> f32 {
+    0.25
+}
 fn default_attack_ms() -> f32 {
     40.0
 }
@@ -335,6 +352,9 @@ impl Config {
         s.balance_g = s.balance_g.clamp(20, 100);
         s.balance_b = s.balance_b.clamp(20, 100);
         s.display_vibrance_pct = s.display_vibrance_pct.clamp(50, 200);
+        s.led_match_pct = s.led_match_pct.min(100);
+        s.led_green = f(s.led_green, 1.0, 3.5, 2.0);
+        s.led_blue = f(s.led_blue, 0.1, 1.0, 0.25);
         if s.edge_number != 3 && s.edge_number != 4 {
             s.edge_number = 3;
         }
@@ -511,6 +531,9 @@ impl Default for SyncConfig {
             balance_g: default_balance(),
             balance_b: default_balance(),
             display_vibrance_pct: default_balance(),
+            led_match_pct: default_balance(),
+            led_green: default_led_green(),
+            led_blue: default_led_blue(),
             power_limit_pct: default_power_limit_pct(),
             detect_auto: true,
             edge_depth_pct: default_edge_depth_pct(),
@@ -605,6 +628,8 @@ mod tests {
             (100, 100, 100)
         );
         assert_eq!(c.sync.display_vibrance_pct, 100);
+        assert_eq!(c.sync.led_match_pct, 100);
+        assert_eq!((c.sync.led_green, c.sync.led_blue), (2.0, 0.25));
         assert_eq!(c.sync.edge_depth_pct, 15);
         assert!(c.sync.skip_black_bars);
         assert_eq!(c.sync.black_level, 26);

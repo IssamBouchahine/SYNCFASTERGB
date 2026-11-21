@@ -1313,6 +1313,41 @@ impl SettingsGui {
                     .size(11.5)
                     .color(theme::MUTED),
                 );
+                let mut lm = self.config.sync.led_match_pct as f32;
+                ch |= slider_row(ui, "LED color correction", &mut lm, 0.0, 100.0, " %", 0);
+                self.config.sync.led_match_pct = lm.round().clamp(0.0, 100.0) as u8;
+                ui.label(
+                    egui::RichText::new(
+                        "The strip's LEDs are not the same colors as the screen's: its green is bluer, its red deeper. This mixes in what is needed so greens, yellows and whites look like the screen's. 100% is full correction.",
+                    )
+                    .size(11.5)
+                    .color(theme::MUTED),
+                );
+                ch |= slider_row(
+                    ui,
+                    "Strip green vs red",
+                    &mut self.config.sync.led_green,
+                    1.0,
+                    3.5,
+                    "",
+                    2,
+                );
+                ch |= slider_row(
+                    ui,
+                    "Strip blue vs red",
+                    &mut self.config.sync.led_blue,
+                    0.1,
+                    1.0,
+                    "",
+                    2,
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Fine-tuning: how strong the strip's green and blue LEDs are next to its red one. If white looks bluish, lower the blue; if yellow looks orange, raise the green.",
+                    )
+                    .size(11.5)
+                    .color(theme::MUTED),
+                );
                 let balance = |ui: &mut egui::Ui, name: &str, v: &mut u8| -> bool {
                     let mut pct = *v as f32;
                     let changed = slider_row(ui, name, &mut pct, 20.0, 100.0, " %", 0);
@@ -1341,6 +1376,9 @@ impl SettingsGui {
                 );
                 if ui.button("Reset color matching").clicked() {
                     self.config.sync.display_vibrance_pct = 100;
+                    self.config.sync.led_match_pct = 100;
+                    self.config.sync.led_green = 2.0;
+                    self.config.sync.led_blue = 0.25;
                     self.config.sync.match_gamma = 1.6;
                     self.config.sync.balance_r = 100;
                     self.config.sync.balance_g = 100;

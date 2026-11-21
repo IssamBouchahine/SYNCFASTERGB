@@ -173,6 +173,10 @@ pub struct Grade {
     pub gains: [f32; 3],
     /// Colourfulness of the monitor relative to the captured picture (1.0 = the same), in accurate mode.
     pub vibrance: f32,
+    /// Converts the screen's light into the strip's LED drive (see `led_matrix`), in accurate mode.
+    pub matrix: [[f32; 3]; 3],
+    /// How much of that conversion is applied, 0.0..=1.0.
+    pub led_match: f32,
 }
 
 impl Default for Grade {
@@ -188,6 +192,8 @@ impl Default for Grade {
             accurate: false,
             gains: [1.0; 3],
             vibrance: 1.0,
+            matrix: IDENTITY,
+            led_match: 0.0,
         }
     }
 }
@@ -398,7 +404,7 @@ pub fn grade(c: Led, g: &Grade) -> Led {
     if g.accurate {
         // real light: the colour (hue and saturation) is exact, the overall level follows the
         // brightness curve, then the strip's tint is corrected
-        c = exact_colour_at_level(c, ACCURATE_COLOUR_GAMMA, g.gamma);
+        c = exact_colour_at_level(c, ACCURATE_COLOUR_GAMMA, g.gamma, &g.matrix, g.led_match);
         c = vibrance(c, g.vibrance);
         c = suppress_stray_between(c, STRAY_LOW_LINEAR, STRAY_HIGH_LINEAR);
         c = [c[0] * g.gains[0], c[1] * g.gains[1], c[2] * g.gains[2]];
@@ -417,25 +423,146 @@ pub fn grade(c: Led, g: &Grade) -> Led {
 /// `ACCURATE_COLOUR_GAMMA` on every channel gives the light of each primary.
 const ACCURATE_COLOUR_GAMMA: f32 = 2.2;
 
+const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+/// CIE xy chromaticities of a typical RGB strip's LEDs: about 625 nm red, 525 nm green and
+/// 468 nm blue. They are more saturated than the screen's primaries and differ in hue: the strip's
+/// green is bluer than the screen's yellow-green, its red deeper.
+const LED_RED_XY: (f64, f64) = (0.69, 0.31);
+const LED_GREEN_XY: (f64, f64) = (0.17, 0.70);
+const LED_BLUE_XY: (f64, f64) = (0.14, 0.05);
+
+/// Linear sRGB to CIE XYZ (D65).
+const SRGB_TO_XYZ: [[f64; 3]; 3] = [
+    [0.4124, 0.3576, 0.1805],
+    [0.2126, 0.7152, 0.0722],
+    [0.0193, 0.1192, 0.9505],
+];
+
+/// CIE XYZ of the strip's three LEDs at full drive, one per column. `green` and `blue` are their
+/// luminance relative to the red LED's (so `[1, green, blue]`).
+pub fn led_xyz_matrix(green: f32, blue: f32) -> [[f64; 3]; 3] {
+    let column = |xy: (f64, f64), luminance: f64| {
+        let (x, y) = xy;
+        [x / y * luminance, luminance, (1.0 - x - y) / y * luminance]
+    };
+    let r = column(LED_RED_XY, 1.0);
+    let g = column(LED_GREEN_XY, green as f64);
+    let b = column(LED_BLUE_XY, blue as f64);
+    [[r[0], g[0], b[0]], [r[1], g[1], b[1]], [r[2], g[2], b[2]]]
+}
+
+fn invert3(m: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
+    let c = |r: usize, c: usize| m[r][c];
+    let cof = [
+        [
+            c(1, 1) * c(2, 2) - c(1, 2) * c(2, 1),
+            c(0, 2) * c(2, 1) - c(0, 1) * c(2, 2),
+            c(0, 1) * c(1, 2) - c(0, 2) * c(1, 1),
+        ],
+        [
+            c(1, 2) * c(2, 0) - c(1, 0) * c(2, 2),
+            c(0, 0) * c(2, 2) - c(0, 2) * c(2, 0),
+            c(0, 2) * c(1, 0) - c(0, 0) * c(1, 2),
+        ],
+        [
+            c(1, 0) * c(2, 1) - c(1, 1) * c(2, 0),
+            c(0, 1) * c(2, 0) - c(0, 0) * c(2, 1),
+            c(0, 0) * c(1, 1) - c(0, 1) * c(1, 0),
+        ],
+    ];
+    let det = c(0, 0) * cof[0][0] + c(0, 1) * cof[1][0] + c(0, 2) * cof[2][0];
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return None;
+    }
+    let mut out = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            out[i][j] = cof[i][j] / det;
+        }
+    }
+    Some(out)
+}
+
+/// The conversion from the screen's light (linear sRGB) to the strip's LED drive that makes the
+/// strip emit light of the same colour: `drive = M * linear_srgb`. White comes out neutral, and
+/// every colour keeps its chromaticity (within what the LEDs can make). `green` and `blue` are
+/// the strength of the strip's green and blue LEDs relative to its red one. Invalid input gives
+/// the identity (no correction).
+pub fn led_matrix(green: f32, blue: f32) -> [[f32; 3]; 3] {
+    if !(green.is_finite() && blue.is_finite() && green > 0.0 && blue > 0.0) {
+        return IDENTITY;
+    }
+    let Some(inv) = invert3(led_xyz_matrix(green, blue)) else {
+        return IDENTITY;
+    };
+    let mut m = [[0.0f32; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            let v: f64 = (0..3).map(|k| inv[i][k] * SRGB_TO_XYZ[k][j]).sum();
+            m[i][j] = v as f32;
+        }
+    }
+    m
+}
+
+fn mul3(m: &[[f32; 3]; 3], v: Led) -> Led {
+    [
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+    ]
+}
+
 /// A colour with the exact hue and saturation of the screen's light, at a brightness set by its
-/// own curve. The ratios between the channels come from real light (`colour_gamma`); the level
-/// of the strongest channel follows `level_gamma`. With both equal this is a plain gamma; a
-/// lower `level_gamma` keeps dark and mid scenes brighter without changing any colour.
-fn exact_colour_at_level(c: Led, colour_gamma: f32, level_gamma: f32) -> Led {
+/// own curve. The balance between the channels comes from real light (`colour_gamma`), converted
+/// to the strip's LEDs by `matrix` (applied as far as `strength`, 0.0..=1.0); the level of the
+/// strongest channel follows `level_gamma`. With both gammas equal and no correction this is a
+/// plain gamma; a lower `level_gamma` keeps dark and mid scenes brighter without changing any
+/// colour.
+fn exact_colour_at_level(
+    c: Led,
+    colour_gamma: f32,
+    level_gamma: f32,
+    matrix: &[[f32; 3]; 3],
+    strength: f32,
+) -> Led {
     let m = c[0].max(c[1]).max(c[2]);
-    if m <= 0.0 || (colour_gamma - level_gamma).abs() < 1e-3 {
+    let s = if strength.is_finite() {
+        strength.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if m <= 0.0 || (s <= 0.0 && (colour_gamma - level_gamma).abs() < 1e-3) {
         return apply_gamma(c, level_gamma);
     }
     let light = |v: f32| (v / 255.0).powf(colour_gamma);
-    let top = light(m);
+    let lin = [light(c[0]), light(c[1]), light(c[2])];
+    let top = lin[0].max(lin[1]).max(lin[2]);
     if top <= 0.0 {
+        return [0.0; 3];
+    }
+    // the colour as ratios: the screen's own, and the LED drive that reproduces it
+    let plain = [lin[0] / top, lin[1] / top, lin[2] / top];
+    let mut ratios = plain;
+    if s > 0.0 {
+        let driven = mul3(matrix, lin).map(|v| v.max(0.0));
+        let dtop = driven[0].max(driven[1]).max(driven[2]);
+        if dtop > 0.0 {
+            for k in 0..3 {
+                ratios[k] = (1.0 - s) * plain[k] + s * driven[k] / dtop;
+            }
+        }
+    }
+    let rtop = ratios[0].max(ratios[1]).max(ratios[2]);
+    if rtop <= 0.0 {
         return [0.0; 3];
     }
     let level = 255.0 * (m / 255.0).powf(level_gamma);
     [
-        (light(c[0]) / top * level).clamp(0.0, 255.0),
-        (light(c[1]) / top * level).clamp(0.0, 255.0),
-        (light(c[2]) / top * level).clamp(0.0, 255.0),
+        (ratios[0] / rtop * level).clamp(0.0, 255.0),
+        (ratios[1] / rtop * level).clamp(0.0, 255.0),
+        (ratios[2] / rtop * level).clamp(0.0, 255.0),
     ]
 }
 
@@ -980,6 +1107,128 @@ mod tests {
             assert!(more.iter().all(|v| (0.0..=255.0).contains(v)));
         }
         assert_eq!(vibrance([10.0, 20.0, 30.0], f32::NAN), [10.0, 20.0, 30.0]);
+    }
+
+    /// Chromaticity (CIE xy) of the light a drive vector makes on the modelled strip.
+    fn led_xy(drive: Led, green: f32, blue: f32) -> (f64, f64) {
+        let p = led_xyz_matrix(green, blue);
+        let d = [drive[0] as f64, drive[1] as f64, drive[2] as f64];
+        let xyz: Vec<f64> = (0..3)
+            .map(|i| p[i][0] * d[0] + p[i][1] * d[1] + p[i][2] * d[2])
+            .collect();
+        let sum = xyz.iter().sum::<f64>();
+        (xyz[0] / sum, xyz[1] / sum)
+    }
+
+    /// Chromaticity (CIE xy) of what the screen shows for a linear sRGB colour.
+    fn screen_xy(lin: [f64; 3]) -> (f64, f64) {
+        let xyz: Vec<f64> = (0..3)
+            .map(|i| (0..3).map(|j| SRGB_TO_XYZ[i][j] * lin[j]).sum::<f64>())
+            .collect();
+        let sum = xyz.iter().sum::<f64>();
+        (xyz[0] / sum, xyz[1] / sum)
+    }
+
+    #[test]
+    fn the_led_matrix_makes_white_neutral_and_keeps_every_colour_of_the_screen() {
+        for (green, blue) in [(2.0f32, 0.25f32), (2.4, 0.21), (1.6, 0.5), (3.0, 0.15)] {
+            let m = led_matrix(green, blue);
+            // white: the strip's light is D65, as the screen's
+            let white = mul3(&m, [1.0; 3]);
+            let (wx, wy) = led_xy(white, green, blue);
+            assert!(
+                (wx - 0.3127).abs() < 0.003 && (wy - 0.3290).abs() < 0.003,
+                "white at {green}/{blue}: {wx:.4} {wy:.4}"
+            );
+            // the screen's primaries come out with the screen's chromaticity
+            for (k, want) in [(0usize, (0.64, 0.33)), (1, (0.30, 0.60)), (2, (0.15, 0.06))] {
+                let mut lin = [0.0f32; 3];
+                lin[k] = 1.0;
+                let d = mul3(&m, lin);
+                let (x, y) = led_xy(d, green, blue);
+                assert!(
+                    d.iter().all(|v| *v >= -1e-3),
+                    "primary {k} needs a negative LED at {green}/{blue}: {d:?}"
+                );
+                assert!(
+                    (x - want.0).abs() < 0.004 && (y - want.1).abs() < 0.004,
+                    "primary {k} at {green}/{blue}: {x:.4} {y:.4}"
+                );
+            }
+        }
+        // no or invalid strip data: no correction at all
+        assert_eq!(led_matrix(f32::NAN, 0.3), IDENTITY);
+        assert_eq!(led_matrix(2.0, 0.0), IDENTITY);
+        assert_eq!(led_matrix(-1.0, 0.3), IDENTITY);
+    }
+
+    #[test]
+    fn corrected_colours_match_the_screens_chromaticity_across_a_sweep() {
+        let (green, blue) = (2.0f32, 0.25f32);
+        let m = led_matrix(green, blue);
+        let steps: Vec<f32> = (0..=16).map(|i| i as f32 * 15.9375).collect();
+        let mut worst = 0.0f64;
+        let mut checked = 0;
+        for &r in &steps {
+            for &gr in &steps {
+                for &b in &steps {
+                    if r.max(gr).max(b) < 60.0 {
+                        continue;
+                    }
+                    let out = exact_colour_at_level([r, gr, b], 2.2, 2.2, &m, 1.0);
+                    let lin = [
+                        (r as f64 / 255.0).powf(2.2),
+                        (gr as f64 / 255.0).powf(2.2),
+                        (b as f64 / 255.0).powf(2.2),
+                    ];
+                    // colours the LEDs cannot make without a negative drive are clamped: skip
+                    let raw = mul3(&m, [lin[0] as f32, lin[1] as f32, lin[2] as f32]);
+                    if raw.iter().any(|v| *v < -1e-4) {
+                        continue;
+                    }
+                    let (x, y) = led_xy(out, green, blue);
+                    let (sx, sy) = screen_xy(lin);
+                    let err = ((x - sx).powi(2) + (y - sy).powi(2)).sqrt();
+                    worst = worst.max(err);
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 3000, "{checked}");
+        // within the rounding of the drive values, a colour is the same colour
+        assert!(worst < 0.01, "worst chromaticity error {worst}");
+    }
+
+    #[test]
+    fn the_observed_wrong_colours_are_corrected_in_the_right_direction() {
+        let m = led_matrix(2.0, 0.25);
+        let drive = |c: [f32; 3]| exact_colour_at_level(c, 2.2, 2.2, &m, 1.0);
+        let plain = |c: [f32; 3]| exact_colour_at_level(c, 2.2, 2.2, &IDENTITY, 0.0);
+        // bright green looked light blue: it needs red mixed in
+        let green = drive([0.0, 200.0, 0.0]);
+        assert!(green[0] > 0.2 * green[1] && green[2] < 1.0, "{green:?}");
+        assert_eq!(plain([0.0, 200.0, 0.0])[0], 0.0);
+        // yellow looked warm: less red against green than before
+        let (y, y0) = (drive([255.0, 255.0, 0.0]), plain([255.0, 255.0, 0.0]));
+        assert!(y[0] / y[1] < y0[0] / y0[1] - 0.05, "{y:?} vs {y0:?}");
+        // white looked bluish: less blue (and red) against green
+        let (w, w0) = (drive([255.0; 3]), plain([255.0; 3]));
+        assert!(w[2] < 0.85 * w0[2] && w[0] < w0[0], "{w:?} vs {w0:?}");
+        // pure red and blue stay essentially pure
+        let red = drive([255.0, 0.0, 0.0]);
+        assert!(red[1] < 0.15 * red[0] && red[2] < 0.05 * red[0], "{red:?}");
+        let blue = drive([0.0, 0.0, 255.0]);
+        assert!(
+            blue[0] < 0.08 * blue[2] && blue[1] < 0.05 * blue[2],
+            "{blue:?}"
+        );
+        // a strength of zero is no correction, half is in between
+        let half = exact_colour_at_level([0.0, 200.0, 0.0], 2.2, 2.2, &m, 0.5);
+        assert!(half[0] > 0.0 && half[0] < green[0]);
+        assert_eq!(
+            exact_colour_at_level([60.0, 30.0, 20.0], 2.2, 2.2, &m, 0.0),
+            plain([60.0, 30.0, 20.0])
+        );
     }
 
     #[test]
