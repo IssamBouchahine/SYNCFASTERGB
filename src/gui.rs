@@ -1325,6 +1325,47 @@ impl SettingsGui {
                 );
                 ch |= slider_row(
                     ui,
+                    "Color curve",
+                    &mut self.config.sync.colour_curve,
+                    1.6,
+                    2.6,
+                    "",
+                    2,
+                );
+                ch |= slider_row(
+                    ui,
+                    "Dark colors: extra curve",
+                    &mut self.config.sync.dark_curve_extra,
+                    0.0,
+                    3.0,
+                    "",
+                    2,
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Raise this if dark colors (a dark red-brown, for example) look too orange or too pale; it only affects dark colors.",
+                    )
+                    .size(11.5)
+                    .color(theme::MUTED),
+                );
+                ch |= slider_row(
+                    ui,
+                    "Dark colors: dimmer",
+                    &mut self.config.sync.dark_level_extra,
+                    0.0,
+                    1.5,
+                    "",
+                    2,
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Raise this if dark colors look brighter on the strip than on the screen; it only affects dark colors.",
+                    )
+                    .size(11.5)
+                    .color(theme::MUTED),
+                );
+                ch |= slider_row(
+                    ui,
                     "Strip green vs red",
                     &mut self.config.sync.led_green,
                     1.0,
@@ -1375,14 +1416,18 @@ impl SettingsGui {
                     .color(theme::MUTED),
                 );
                 if ui.button("Reset color matching").clicked() {
-                    self.config.sync.display_vibrance_pct = 100;
-                    self.config.sync.led_match_pct = 100;
-                    self.config.sync.led_green = 2.0;
-                    self.config.sync.led_blue = 0.25;
-                    self.config.sync.match_gamma = 1.6;
-                    self.config.sync.balance_r = 100;
-                    self.config.sync.balance_g = 100;
-                    self.config.sync.balance_b = 100;
+                    let d = config::SyncConfig::default();
+                    self.config.sync.display_vibrance_pct = d.display_vibrance_pct;
+                    self.config.sync.led_match_pct = d.led_match_pct;
+                    self.config.sync.led_green = d.led_green;
+                    self.config.sync.led_blue = d.led_blue;
+                    self.config.sync.colour_curve = d.colour_curve;
+                    self.config.sync.dark_curve_extra = d.dark_curve_extra;
+                    self.config.sync.dark_level_extra = d.dark_level_extra;
+                    self.config.sync.match_gamma = d.match_gamma;
+                    self.config.sync.balance_r = d.balance_r;
+                    self.config.sync.balance_g = d.balance_g;
+                    self.config.sync.balance_b = d.balance_b;
                     ch = true;
                 }
             } else {

@@ -177,6 +177,13 @@ pub struct Grade {
     pub matrix: [[f32; 3]; 3],
     /// How much of that conversion is applied, 0.0..=1.0.
     pub led_match: f32,
+    /// Curve that turns the screen's encoded values into light for the colour balance (2.2 is the
+    /// standard), in accurate mode.
+    pub colour_gamma: f32,
+    /// Extra steepness of that curve for dark colours (fading to nothing at half brightness).
+    pub dark_extra: f32,
+    /// Extra steepness of the brightness curve for dark colours: keeps them as dim as on screen.
+    pub dark_level: f32,
 }
 
 impl Default for Grade {
@@ -194,6 +201,9 @@ impl Default for Grade {
             vibrance: 1.0,
             matrix: IDENTITY,
             led_match: 0.0,
+            colour_gamma: 2.2,
+            dark_extra: DARK_CURVE_EXTRA,
+            dark_level: 0.0,
         }
     }
 }
@@ -404,8 +414,18 @@ pub fn grade(c: Led, g: &Grade) -> Led {
     if g.accurate {
         // real light: the colour (hue and saturation) is exact, the overall level follows the
         // brightness curve, then the strip's tint is corrected
-        c = exact_colour_at_level(c, ACCURATE_COLOUR_GAMMA, g.gamma, &g.matrix, g.led_match);
-        c = vibrance(c, g.vibrance);
+        c = exact_colour_inner(
+            c,
+            &ColourParams {
+                colour_gamma: g.colour_gamma,
+                level_gamma: g.gamma,
+                matrix: &g.matrix,
+                strength: g.led_match,
+                vibrance: g.vibrance,
+                dark_extra: g.dark_extra,
+                dark_level: g.dark_level,
+            },
+        );
         c = suppress_stray_between(c, STRAY_LOW_LINEAR, STRAY_HIGH_LINEAR);
         c = [c[0] * g.gains[0], c[1] * g.gains[1], c[2] * g.gains[2]];
     } else {
@@ -418,10 +438,6 @@ pub fn grade(c: Led, g: &Grade) -> Led {
     }
     scale(c, g.brightness)
 }
-
-/// What the screen's encoding really means for the colour of a pixel: undoing a gamma of
-/// `ACCURATE_COLOUR_GAMMA` on every channel gives the light of each primary.
-const ACCURATE_COLOUR_GAMMA: f32 = 2.2;
 
 const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
@@ -520,24 +536,89 @@ fn mul3(m: &[[f32; 3]; 3], v: Led) -> Led {
 /// strongest channel follows `level_gamma`. With both gammas equal and no correction this is a
 /// plain gamma; a lower `level_gamma` keeps dark and mid scenes brighter without changing any
 /// colour.
+#[cfg(test)]
 fn exact_colour_at_level(
     c: Led,
     colour_gamma: f32,
     level_gamma: f32,
     matrix: &[[f32; 3]; 3],
     strength: f32,
+    vib: f32,
 ) -> Led {
+    exact_colour_inner(
+        c,
+        &ColourParams {
+            colour_gamma,
+            level_gamma,
+            matrix,
+            strength,
+            vibrance: vib,
+            dark_extra: DARK_CURVE_EXTRA,
+            dark_level: 0.0,
+        },
+    )
+}
+
+/// Everything that decides how a screen colour becomes a strip colour in accurate mode.
+#[derive(Clone, Copy)]
+struct ColourParams<'a> {
+    /// Curve that turns the screen's encoded values into light.
+    colour_gamma: f32,
+    /// Curve of the level (the strongest channel).
+    level_gamma: f32,
+    /// Screen light to LED drive, applied as far as `strength`.
+    matrix: &'a [[f32; 3]; 3],
+    strength: f32,
+    /// Display-vibrance compensation (1.0 = none).
+    vibrance: f32,
+    /// Extra steepness of the colour curve and of the level curve for dark colours.
+    dark_extra: f32,
+    dark_level: f32,
+}
+
+/// `exact_colour_at_level` with every parameter given, so the dark handling can be compared
+/// against its absence.
+fn exact_colour_inner(c: Led, p: &ColourParams<'_>) -> Led {
+    let ColourParams {
+        colour_gamma,
+        level_gamma,
+        matrix,
+        strength,
+        vibrance: vib,
+        dark_extra,
+        dark_level,
+    } = *p;
     let m = c[0].max(c[1]).max(c[2]);
     let s = if strength.is_finite() {
         strength.clamp(0.0, 1.0)
     } else {
         0.0
     };
-    if m <= 0.0 || (s <= 0.0 && (colour_gamma - level_gamma).abs() < 1e-3) {
+    // How much a colour of this brightness is a "bright" colour (0 = black, 1 = half brightness
+    // and up). Dark colours look different from bright ones: a driver's vibrance acts on the
+    // colours of a picture, not on near-black (a full boost would delete the weakest channel of
+    // a dark brown and turn it into plain orange), and their weaker channels fall away faster,
+    // which keeps a dark red-brown red instead of orange.
+    let weight = vibrance_weight(m / 255.0);
+    let vib = if vib.is_finite() {
+        1.0 + (vib - 1.0) * weight * weight
+    } else {
+        1.0
+    };
+    let vibrant = (vib - 1.0).abs() >= 1e-3;
+    let colour_gamma = colour_gamma + dark_extra * (1.0 - weight);
+    // a dark colour is also as dim on the strip as it is on the screen
+    let level_gamma = level_gamma + dark_level * (1.0 - weight);
+    if m <= 0.0 || (s <= 0.0 && !vibrant && (colour_gamma - level_gamma).abs() < 1e-3) {
         return apply_gamma(c, level_gamma);
     }
     let light = |v: f32| (v / 255.0).powf(colour_gamma);
-    let lin = [light(c[0]), light(c[1]), light(c[2])];
+    let mut lin = [light(c[0]), light(c[1]), light(c[2])];
+    if vibrant {
+        // the monitor's driver makes colours more (or less) colourful than the captured picture:
+        // do the same to the screen's light, before it is converted to the strip's LEDs
+        lin = vibrance(lin.map(|v| v * 255.0), vib).map(|v| v / 255.0);
+    }
     let top = lin[0].max(lin[1]).max(lin[2]);
     if top <= 0.0 {
         return [0.0; 3];
@@ -564,6 +645,17 @@ fn exact_colour_at_level(
         (ratios[1] / rtop * level).clamp(0.0, 255.0),
         (ratios[2] / rtop * level).clamp(0.0, 255.0),
     ]
+}
+
+/// Extra steepness of the colour curve for black, fading to nothing at half brightness.
+const DARK_CURVE_EXTRA: f32 = 0.9;
+
+/// How much of the display-vibrance compensation a colour of this brightness (its strongest
+/// channel, 0.0..=1.0) gets: none for black, about half for a dark brown, all of it from half
+/// brightness up.
+fn vibrance_weight(level: f32) -> f32 {
+    let t = (level / 0.5).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Scale the colourfulness of a colour in light, keeping its brightness. `s` of 1.0 changes
@@ -1008,16 +1100,19 @@ mod tests {
         // the colours reported wrong on the strip: a dark red-brown and a pastel tan
         let brown = grade(led([60, 30, 20]), &g);
         let tan = grade(led([200, 140, 90]), &g);
-        for (out, src) in [(brown, [60.0, 30.0, 20.0]), (tan, [200.0, 140.0, 90.0])] {
-            for k in 0..3 {
-                assert!(
-                    near(out[k], light(src[k], 2.2), 0.6),
-                    "{src:?} channel {k}: {} vs {}",
-                    out[k],
-                    light(src[k], 2.2)
-                );
-            }
+        // the tan is exactly the screen's light; the dark brown keeps its red exactly and its
+        // weaker channels only ever lose (dark colours get a steeper colour curve on purpose)
+        for k in 0..3 {
+            let src = [200.0, 140.0, 90.0];
+            assert!(
+                near(tan[k], light(src[k], 2.2), 0.6),
+                "tan channel {k}: {} vs {}",
+                tan[k],
+                light(src[k], 2.2)
+            );
         }
+        assert!(near(brown[0], light(60.0, 2.2), 0.6));
+        assert!(brown[1] <= light(30.0, 2.2) + 0.01 && brown[2] <= light(20.0, 2.2) + 0.01);
         // no saturation boost: the brown stays dark and red-brown, the tan stays a soft amber
         assert!(brown[0] < 12.0 && brown[1] < 3.0);
         assert!(tan[1] / tan[0] > 0.4 && tan[2] / tan[0] > 0.15);
@@ -1044,8 +1139,8 @@ mod tests {
                         "{r} {gr} {b} -> {out:?}"
                     );
                     let m = r.max(gr).max(b);
-                    if m < 40.0 {
-                        continue; // the black knee shapes near-black on purpose
+                    if m < 128.0 {
+                        continue; // dark colours get their own, steeper colour curve on purpose
                     }
                     let want = [light(r, 2.2), light(gr, 2.2), light(b, 2.2)];
                     let top = want[0].max(want[1]).max(want[2]);
@@ -1172,10 +1267,10 @@ mod tests {
         for &r in &steps {
             for &gr in &steps {
                 for &b in &steps {
-                    if r.max(gr).max(b) < 60.0 {
-                        continue;
+                    if r.max(gr).max(b) < 128.0 {
+                        continue; // dark colours get a steeper colour curve on purpose
                     }
-                    let out = exact_colour_at_level([r, gr, b], 2.2, 2.2, &m, 1.0);
+                    let out = exact_colour_at_level([r, gr, b], 2.2, 2.2, &m, 1.0, 1.0);
                     let lin = [
                         (r as f64 / 255.0).powf(2.2),
                         (gr as f64 / 255.0).powf(2.2),
@@ -1194,16 +1289,110 @@ mod tests {
                 }
             }
         }
-        assert!(checked > 3000, "{checked}");
+        assert!(checked > 2500, "{checked}");
         // within the rounding of the drive values, a colour is the same colour
         assert!(worst < 0.01, "worst chromaticity error {worst}");
     }
 
     #[test]
+    fn display_vibrance_deepens_a_pastel_before_it_reaches_the_led_conversion() {
+        let m = led_matrix(2.0, 0.25);
+        let tan = [200.0, 140.0, 90.0];
+        let normal = exact_colour_at_level(tan, 2.2, 1.6, &m, 1.0, 1.0);
+        let vivid = exact_colour_at_level(tan, 2.2, 1.6, &m, 1.0, 1.3);
+        // a more colourful monitor wants a deeper colour on the strip: less green and blue
+        assert!(vivid[1] / vivid[0] < normal[1] / normal[0]);
+        assert!(vivid[2] / vivid[0] < normal[2] / normal[0]);
+        // the strongest channel (the level) is unchanged, greys are unchanged
+        assert!(near(vivid[0], normal[0], 0.01));
+        let grey_a = exact_colour_at_level([120.0; 3], 2.2, 1.6, &m, 1.0, 1.0);
+        let grey_b = exact_colour_at_level([120.0; 3], 2.2, 1.6, &m, 1.0, 1.5);
+        for k in 0..3 {
+            assert!(near(grey_a[k], grey_b[k], 0.01));
+        }
+        // with the conversion off, a plain vibrance still works and 1.0 changes nothing
+        let off = exact_colour_at_level(tan, 2.2, 1.6, &IDENTITY, 0.0, 1.0);
+        let off_v = exact_colour_at_level(tan, 2.2, 1.6, &IDENTITY, 0.0, 1.3);
+        assert!(off_v[1] / off_v[0] < off[1] / off[0]);
+    }
+
+    #[test]
+    fn display_vibrance_leaves_dark_colours_almost_alone() {
+        let m = led_matrix(3.0, 0.28);
+        // a dark red-brown keeps part of its blue: a full boost would have deleted it
+        let plain = exact_colour_at_level([60.0, 30.0, 20.0], 2.1, 1.6, &m, 1.0, 1.0);
+        let vivid = exact_colour_at_level([60.0, 30.0, 20.0], 2.1, 1.6, &m, 1.0, 1.35);
+        assert!(plain[2] > 0.5, "{plain:?}");
+        assert!(
+            vivid[2] > 0.3 * plain[2] && vivid[2] < plain[2] && vivid[1] > 0.7 * plain[1],
+            "{vivid:?} vs {plain:?}"
+        );
+        // a bright colour gets the whole boost
+        let b_plain = exact_colour_at_level([200.0, 140.0, 90.0], 2.1, 1.6, &m, 1.0, 1.0);
+        let b_vivid = exact_colour_at_level([200.0, 140.0, 90.0], 2.1, 1.6, &m, 1.0, 1.35);
+        assert!(b_vivid[2] < 0.8 * b_plain[2], "{b_vivid:?} vs {b_plain:?}");
+        // the weight grows smoothly with brightness and is 0 / 1 at the ends
+        assert_eq!(vibrance_weight(0.0), 0.0);
+        assert_eq!(vibrance_weight(1.0), 1.0);
+        let mut prev = -1.0;
+        for i in 0..=100 {
+            let w = vibrance_weight(i as f32 / 100.0);
+            assert!(w >= prev && (0.0..=1.0).contains(&w));
+            prev = w;
+        }
+    }
+
+    #[test]
+    fn a_dark_red_brown_stays_red_and_bright_colours_keep_their_confirmed_settings() {
+        let m = led_matrix(3.0, 0.28);
+        let at = |c: [f32; 3], curve: f32| exact_colour_at_level(c, curve, 1.6, &m, 1.0, 1.35);
+        // dark: a steeper curve gives it less green against red than the plain curve would
+        let dark = at([60.0, 30.0, 20.0], 2.1);
+        let flat = exact_colour_at_level([60.0, 30.0, 20.0], 2.1, 1.6, &m, 1.0, 1.0);
+        assert!(
+            dark[1] / dark[0] < 0.95 * flat[1] / flat[0],
+            "{dark:?} vs {flat:?}"
+        );
+        // bright colours (half brightness and up) are untouched by the dark handling: exactly the
+        // same as with no dark handling at all
+        for c in [
+            [200.0, 140.0, 90.0],
+            [255.0, 140.0, 0.0],
+            [150.0, 50.0, 200.0],
+            [255.0, 255.0, 0.0],
+            [0.0, 200.0, 0.0],
+            [255.0; 3],
+            [135.0, 206.0, 235.0],
+        ] {
+            let with = at(c, 2.1);
+            let without = exact_colour_inner(
+                c,
+                &ColourParams {
+                    colour_gamma: 2.1,
+                    level_gamma: 1.6,
+                    matrix: &m,
+                    strength: 1.0,
+                    vibrance: 1.35,
+                    dark_extra: 0.0,
+                    dark_level: 0.0,
+                },
+            );
+            assert_eq!(with, without, "{c:?}");
+        }
+        // and the handling fades in smoothly towards dark: more steepness the darker
+        let g = |level: f32| {
+            let v = level * 255.0;
+            let o = exact_colour_at_level([v, v * 0.5, v * 0.33], 2.1, 1.6, &m, 1.0, 1.0);
+            o[1] / o[0]
+        };
+        assert!(g(0.15) < g(0.25) && g(0.25) < g(0.35) && g(0.35) < g(0.45));
+    }
+
+    #[test]
     fn the_observed_wrong_colours_are_corrected_in_the_right_direction() {
         let m = led_matrix(2.0, 0.25);
-        let drive = |c: [f32; 3]| exact_colour_at_level(c, 2.2, 2.2, &m, 1.0);
-        let plain = |c: [f32; 3]| exact_colour_at_level(c, 2.2, 2.2, &IDENTITY, 0.0);
+        let drive = |c: [f32; 3]| exact_colour_at_level(c, 2.2, 2.2, &m, 1.0, 1.0);
+        let plain = |c: [f32; 3]| exact_colour_at_level(c, 2.2, 2.2, &IDENTITY, 0.0, 1.0);
         // bright green looked light blue: it needs red mixed in
         let green = drive([0.0, 200.0, 0.0]);
         assert!(green[0] > 0.2 * green[1] && green[2] < 1.0, "{green:?}");
@@ -1223,10 +1412,10 @@ mod tests {
             "{blue:?}"
         );
         // a strength of zero is no correction, half is in between
-        let half = exact_colour_at_level([0.0, 200.0, 0.0], 2.2, 2.2, &m, 0.5);
+        let half = exact_colour_at_level([0.0, 200.0, 0.0], 2.2, 2.2, &m, 0.5, 1.0);
         assert!(half[0] > 0.0 && half[0] < green[0]);
         assert_eq!(
-            exact_colour_at_level([60.0, 30.0, 20.0], 2.2, 2.2, &m, 0.0),
+            exact_colour_at_level([60.0, 30.0, 20.0], 2.2, 2.2, &m, 0.0, 1.0),
             plain([60.0, 30.0, 20.0])
         );
     }

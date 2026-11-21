@@ -83,6 +83,18 @@ pub struct SyncConfig {
     pub balance_g: u8,
     #[serde(default = "default_balance")]
     pub balance_b: u8,
+    /// Curve that turns the screen's encoded values into light for the colour balance (2.2 is the
+    /// standard; a little lower gives mid-tones such as orange a touch more green).
+    #[serde(default = "default_colour_curve")]
+    pub colour_curve: f32,
+    /// Extra steepness of the colour curve for dark colours (fading out at half brightness):
+    /// keeps a dark red-brown red instead of orange.
+    #[serde(default = "default_dark_curve_extra")]
+    pub dark_curve_extra: f32,
+    /// Extra steepness of the brightness curve for dark colours (fading out at half brightness):
+    /// keeps a dark colour as dim on the strip as it is on the screen.
+    #[serde(default = "default_dark_level_extra")]
+    pub dark_level_extra: f32,
     /// How much of the correction for the strip's LED colours is applied, in percent. The strip's
     /// green is bluer than the screen's, its red deeper: this mixes in what is needed so greens,
     /// yellows and whites look like the screen's.
@@ -239,11 +251,25 @@ fn default_match_gamma() -> f32 {
 fn default_balance() -> u8 {
     100
 }
+// Calibrated by eye against a white wall on the target strip, colour by colour (yellow, orange,
+// pastel orange, green, white, red, cyan, purple, dark red-brown, skin, sky blue, greys): the
+// strip's green LED is strong against its red one, its blue a little stronger than typical, its
+// red and green need a small trim, a monitor with driver vibrance looks more colourful than the
+// capture, and dark colours need a steeper, dimmer curve.
 fn default_led_green() -> f32 {
-    2.0
+    3.0
 }
 fn default_led_blue() -> f32 {
-    0.25
+    0.28
+}
+fn default_colour_curve() -> f32 {
+    2.1
+}
+fn default_dark_curve_extra() -> f32 {
+    1.35
+}
+fn default_dark_level_extra() -> f32 {
+    0.4
 }
 fn default_attack_ms() -> f32 {
     40.0
@@ -353,6 +379,9 @@ impl Config {
         s.balance_b = s.balance_b.clamp(20, 100);
         s.display_vibrance_pct = s.display_vibrance_pct.clamp(50, 200);
         s.led_match_pct = s.led_match_pct.min(100);
+        s.colour_curve = f(s.colour_curve, 1.6, 2.6, 2.1);
+        s.dark_curve_extra = f(s.dark_curve_extra, 0.0, 3.0, 1.35);
+        s.dark_level_extra = f(s.dark_level_extra, 0.0, 1.5, 0.4);
         s.led_green = f(s.led_green, 1.0, 3.5, 2.0);
         s.led_blue = f(s.led_blue, 0.1, 1.0, 0.25);
         if s.edge_number != 3 && s.edge_number != 4 {
@@ -527,10 +556,13 @@ impl Default for SyncConfig {
             deadband: default_deadband(),
             accurate_color: true,
             match_gamma: default_match_gamma(),
-            balance_r: default_balance(),
-            balance_g: default_balance(),
+            balance_r: 90,
+            balance_g: 90,
             balance_b: default_balance(),
-            display_vibrance_pct: default_balance(),
+            display_vibrance_pct: 135,
+            colour_curve: default_colour_curve(),
+            dark_curve_extra: default_dark_curve_extra(),
+            dark_level_extra: default_dark_level_extra(),
             led_match_pct: default_balance(),
             led_green: default_led_green(),
             led_blue: default_led_blue(),
@@ -625,11 +657,14 @@ mod tests {
         assert_eq!(c.sync.match_gamma, 1.6);
         assert_eq!(
             (c.sync.balance_r, c.sync.balance_g, c.sync.balance_b),
-            (100, 100, 100)
+            (90, 90, 100)
         );
-        assert_eq!(c.sync.display_vibrance_pct, 100);
+        assert_eq!(c.sync.display_vibrance_pct, 135);
         assert_eq!(c.sync.led_match_pct, 100);
-        assert_eq!((c.sync.led_green, c.sync.led_blue), (2.0, 0.25));
+        assert_eq!((c.sync.led_green, c.sync.led_blue), (3.0, 0.28));
+        assert_eq!(c.sync.colour_curve, 2.1);
+        assert_eq!(c.sync.dark_curve_extra, 1.35);
+        assert_eq!(c.sync.dark_level_extra, 0.4);
         assert_eq!(c.sync.edge_depth_pct, 15);
         assert!(c.sync.skip_black_bars);
         assert_eq!(c.sync.black_level, 26);

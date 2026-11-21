@@ -1205,6 +1205,9 @@ fn grade_from_config(sync: &config::SyncConfig) -> pipeline::Grade {
         vibrance: sync.display_vibrance_pct as f32 / 100.0,
         matrix: pipeline::led_matrix(sync.led_green, sync.led_blue),
         led_match: sync.led_match_pct as f32 / 100.0,
+        colour_gamma: sync.colour_curve,
+        dark_extra: sync.dark_curve_extra,
+        dark_level: sync.dark_level_extra,
         gains: [
             sync.balance_r as f32 / 100.0,
             sync.balance_g as f32 / 100.0,
