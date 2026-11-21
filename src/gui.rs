@@ -1308,7 +1308,7 @@ impl SettingsGui {
                 );
                 ui.label(
                     egui::RichText::new(
-                        "2.2 follows the screen exactly. Lower values make dark scenes brighter on the strip.",
+                        "Only changes how bright things are, never their color. 2.2 follows the screen's own light exactly (dark scenes get very dim); lower is brighter. 1.6 is the default.",
                     )
                     .size(11.5)
                     .color(theme::MUTED),
@@ -1341,7 +1341,7 @@ impl SettingsGui {
                 );
                 if ui.button("Reset color matching").clicked() {
                     self.config.sync.display_vibrance_pct = 100;
-                    self.config.sync.match_gamma = 2.2;
+                    self.config.sync.match_gamma = 1.6;
                     self.config.sync.balance_r = 100;
                     self.config.sync.balance_g = 100;
                     self.config.sync.balance_b = 100;

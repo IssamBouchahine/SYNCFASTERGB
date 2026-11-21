@@ -71,7 +71,8 @@ pub struct SyncConfig {
     /// strip. Off = the older "vivid" look (`saturation` and `gamma` apply).
     #[serde(default = "default_true")]
     pub accurate_color: bool,
-    /// Brightness curve of accurate matching. 2.2 is what the screen itself does.
+    /// Brightness curve of accurate matching. 2.2 follows the screen's own light exactly; lower
+    /// values keep dark and mid scenes brighter. Colours (hue, saturation) are exact either way.
     #[serde(default = "default_match_gamma")]
     pub match_gamma: f32,
     /// Per-channel strength in percent (100 = unchanged): lowers a channel the strip's LEDs
@@ -222,7 +223,7 @@ fn default_saturation() -> f32 {
     2.0
 }
 fn default_match_gamma() -> f32 {
-    2.2
+    1.6
 }
 fn default_balance() -> u8 {
     100
@@ -329,7 +330,7 @@ impl Config {
         s.power_limit_pct = s.power_limit_pct.clamp(10, MAX_POWER_LIMIT_PCT);
         s.edge_depth_pct = s.edge_depth_pct.clamp(3, 40);
         s.black_level = s.black_level.clamp(2, 80);
-        s.match_gamma = f(s.match_gamma, 1.0, 3.0, 2.2);
+        s.match_gamma = f(s.match_gamma, 1.0, 3.0, 1.6);
         s.balance_r = s.balance_r.clamp(20, 100);
         s.balance_g = s.balance_g.clamp(20, 100);
         s.balance_b = s.balance_b.clamp(20, 100);
@@ -598,7 +599,7 @@ mod tests {
             c.sync.accurate_color,
             "accurate colour matching is on by default"
         );
-        assert_eq!(c.sync.match_gamma, 2.2);
+        assert_eq!(c.sync.match_gamma, 1.6);
         assert_eq!(
             (c.sync.balance_r, c.sync.balance_g, c.sync.balance_b),
             (100, 100, 100)

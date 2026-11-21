@@ -396,8 +396,9 @@ pub fn power_fraction(leds: &[Led]) -> f32 {
 pub fn grade(c: Led, g: &Grade) -> Led {
     let mut c = knee(c, g.knee_lo as f32, g.knee_hi as f32);
     if g.accurate {
-        // real light: undo the screen's encoding, keep the colour exactly, correct the strip's tint
-        c = apply_gamma(c, g.gamma);
+        // real light: the colour (hue and saturation) is exact, the overall level follows the
+        // brightness curve, then the strip's tint is corrected
+        c = exact_colour_at_level(c, ACCURATE_COLOUR_GAMMA, g.gamma);
         c = vibrance(c, g.vibrance);
         c = suppress_stray_between(c, STRAY_LOW_LINEAR, STRAY_HIGH_LINEAR);
         c = [c[0] * g.gains[0], c[1] * g.gains[1], c[2] * g.gains[2]];
@@ -410,6 +411,32 @@ pub fn grade(c: Led, g: &Grade) -> Led {
         c = apply_gamma(c, g.gamma);
     }
     scale(c, g.brightness)
+}
+
+/// What the screen's encoding really means for the colour of a pixel: undoing a gamma of
+/// `ACCURATE_COLOUR_GAMMA` on every channel gives the light of each primary.
+const ACCURATE_COLOUR_GAMMA: f32 = 2.2;
+
+/// A colour with the exact hue and saturation of the screen's light, at a brightness set by its
+/// own curve. The ratios between the channels come from real light (`colour_gamma`); the level
+/// of the strongest channel follows `level_gamma`. With both equal this is a plain gamma; a
+/// lower `level_gamma` keeps dark and mid scenes brighter without changing any colour.
+fn exact_colour_at_level(c: Led, colour_gamma: f32, level_gamma: f32) -> Led {
+    let m = c[0].max(c[1]).max(c[2]);
+    if m <= 0.0 || (colour_gamma - level_gamma).abs() < 1e-3 {
+        return apply_gamma(c, level_gamma);
+    }
+    let light = |v: f32| (v / 255.0).powf(colour_gamma);
+    let top = light(m);
+    if top <= 0.0 {
+        return [0.0; 3];
+    }
+    let level = 255.0 * (m / 255.0).powf(level_gamma);
+    [
+        (light(c[0]) / top * level).clamp(0.0, 255.0),
+        (light(c[1]) / top * level).clamp(0.0, 255.0),
+        (light(c[2]) / top * level).clamp(0.0, 255.0),
+    ]
 }
 
 /// Scale the colourfulness of a colour in light, keeping its brightness. `s` of 1.0 changes
@@ -953,6 +980,54 @@ mod tests {
             assert!(more.iter().all(|v| (0.0..=255.0).contains(v)));
         }
         assert_eq!(vibrance([10.0, 20.0, 30.0], f32::NAN), [10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn a_gentler_brightness_curve_changes_the_level_but_never_the_colour() {
+        let exact = accurate(2.2, [1.0; 3]);
+        let bright = accurate(1.6, [1.0; 3]);
+        for c in [
+            [60, 30, 20],
+            [200, 140, 90],
+            [170, 10, 15],
+            [135, 206, 235],
+            [40, 40, 40],
+            [141, 85, 36],
+        ] {
+            let a = grade(led(c), &exact);
+            let b = grade(led(c), &bright);
+            let (ta, tb) = (a[0].max(a[1]).max(a[2]), b[0].max(b[1]).max(b[2]));
+            assert!(
+                tb > ta,
+                "{c:?}: the gentler curve is brighter ({tb} vs {ta})"
+            );
+            for k in 0..3 {
+                // same ratio between every channel and the strongest one
+                assert!(
+                    near(a[k] / ta, b[k] / tb, 0.01),
+                    "{c:?} channel {k}: colour changed {} vs {}",
+                    a[k] / ta,
+                    b[k] / tb
+                );
+            }
+            // the strongest channel follows the level curve exactly
+            let m = c.iter().copied().max().unwrap() as f32;
+            assert!(
+                near(tb, light(m, 1.6), 0.6),
+                "{c:?}: {tb} vs {}",
+                light(m, 1.6)
+            );
+        }
+        // equal curves are a plain gamma; white and primaries stay full
+        assert_eq!(grade([255.0; 3], &bright), [255.0; 3]);
+        assert_eq!(grade([255.0, 0.0, 0.0], &bright), [255.0, 0.0, 0.0]);
+        // and a fade is still strictly monotonic
+        let mut prev = -1.0f32;
+        for v in 40..=255 {
+            let out = grade([v as f32; 3], &bright)[0];
+            assert!(out > prev);
+            prev = out;
+        }
     }
 
     #[test]
