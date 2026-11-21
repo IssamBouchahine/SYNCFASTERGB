@@ -1202,6 +1202,7 @@ fn grade_from_config(sync: &config::SyncConfig) -> pipeline::Grade {
         },
         brightness: sync.brightness as f32 / 255.0,
         accurate: sync.accurate_color,
+        vibrance: sync.display_vibrance_pct as f32 / 100.0,
         gains: [
             sync.balance_r as f32 / 100.0,
             sync.balance_g as f32 / 100.0,

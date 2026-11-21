@@ -82,6 +82,11 @@ pub struct SyncConfig {
     pub balance_g: u8,
     #[serde(default = "default_balance")]
     pub balance_b: u8,
+    /// How much more (or less) colourful the monitor looks than the captured picture, in percent
+    /// (100 = the same). Graphics-driver adjustments such as NVIDIA "Digital vibrance" happen
+    /// after the picture is captured, so the app cannot see them; this compensates.
+    #[serde(default = "default_balance")]
+    pub display_vibrance_pct: u8,
     /// Whole-strip power budget in percent of "every LED fully white" (used when
     /// `light_compression` is on). Highlights can reach full brightness; only the total is capped.
     #[serde(default = "default_power_limit_pct")]
@@ -328,6 +333,7 @@ impl Config {
         s.balance_r = s.balance_r.clamp(20, 100);
         s.balance_g = s.balance_g.clamp(20, 100);
         s.balance_b = s.balance_b.clamp(20, 100);
+        s.display_vibrance_pct = s.display_vibrance_pct.clamp(50, 200);
         if s.edge_number != 3 && s.edge_number != 4 {
             s.edge_number = 3;
         }
@@ -503,6 +509,7 @@ impl Default for SyncConfig {
             balance_r: default_balance(),
             balance_g: default_balance(),
             balance_b: default_balance(),
+            display_vibrance_pct: default_balance(),
             power_limit_pct: default_power_limit_pct(),
             detect_auto: true,
             edge_depth_pct: default_edge_depth_pct(),
@@ -596,6 +603,7 @@ mod tests {
             (c.sync.balance_r, c.sync.balance_g, c.sync.balance_b),
             (100, 100, 100)
         );
+        assert_eq!(c.sync.display_vibrance_pct, 100);
         assert_eq!(c.sync.edge_depth_pct, 15);
         assert!(c.sync.skip_black_bars);
         assert_eq!(c.sync.black_level, 26);

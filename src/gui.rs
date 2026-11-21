@@ -1329,7 +1329,18 @@ impl SettingsGui {
                     .size(11.5)
                     .color(theme::MUTED),
                 );
+                let mut vib = self.config.sync.display_vibrance_pct as f32;
+                ch |= slider_row(ui, "Display vibrance", &mut vib, 50.0, 200.0, " %", 0);
+                self.config.sync.display_vibrance_pct = vib.round().clamp(50.0, 200.0) as u8;
+                ui.label(
+                    egui::RichText::new(
+                        "If you use NVIDIA Digital vibrance (or a similar driver setting), your monitor looks more colorful than the picture the app can read. Raise this until the strip matches what you see.",
+                    )
+                    .size(11.5)
+                    .color(theme::MUTED),
+                );
                 if ui.button("Reset color matching").clicked() {
+                    self.config.sync.display_vibrance_pct = 100;
                     self.config.sync.match_gamma = 2.2;
                     self.config.sync.balance_r = 100;
                     self.config.sync.balance_g = 100;

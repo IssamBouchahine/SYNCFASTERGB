@@ -171,6 +171,8 @@ pub struct Grade {
     pub accurate: bool,
     /// Per-channel strength (R, G, B) in accurate mode, 0.0..=1.0.
     pub gains: [f32; 3],
+    /// Colourfulness of the monitor relative to the captured picture (1.0 = the same), in accurate mode.
+    pub vibrance: f32,
 }
 
 impl Default for Grade {
@@ -185,6 +187,7 @@ impl Default for Grade {
             brightness: 1.0,
             accurate: false,
             gains: [1.0; 3],
+            vibrance: 1.0,
         }
     }
 }
@@ -395,6 +398,7 @@ pub fn grade(c: Led, g: &Grade) -> Led {
     if g.accurate {
         // real light: undo the screen's encoding, keep the colour exactly, correct the strip's tint
         c = apply_gamma(c, g.gamma);
+        c = vibrance(c, g.vibrance);
         c = suppress_stray_between(c, STRAY_LOW_LINEAR, STRAY_HIGH_LINEAR);
         c = [c[0] * g.gains[0], c[1] * g.gains[1], c[2] * g.gains[2]];
     } else {
@@ -406,6 +410,30 @@ pub fn grade(c: Led, g: &Grade) -> Led {
         c = apply_gamma(c, g.gamma);
     }
     scale(c, g.brightness)
+}
+
+/// Scale the colourfulness of a colour in light, keeping its brightness. `s` of 1.0 changes
+/// nothing; above 1.0 the colour gets more saturated (what a graphics driver's "digital
+/// vibrance" does to the monitor), below 1.0 less.
+fn vibrance(c: Led, s: f32) -> Led {
+    if !s.is_finite() || (s - 1.0).abs() < 1e-3 {
+        return c;
+    }
+    let luma = |c: Led| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let y = luma(c);
+    let mut o = [0.0f32; 3];
+    for k in 0..3 {
+        o[k] = (y + s * (c[k] - y)).max(0.0);
+    }
+    // cutting negative light adds brightness back: restore the original
+    let y2 = luma(o);
+    if y2 > 1e-6 {
+        let f = y / y2;
+        for v in o.iter_mut() {
+            *v = (*v * f).min(255.0);
+        }
+    }
+    o
 }
 
 /// In accurate mode the strong LEDs' trace amounts are what make a deep red look pink; a channel
@@ -892,6 +920,39 @@ mod tests {
             }
         }
         assert!(checked > 4000, "{checked}");
+    }
+
+    #[test]
+    fn vibrance_keeps_brightness_and_greys_and_only_changes_colourfulness() {
+        let luma = |c: Led| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let chroma = |c: Led| {
+            let top = c[0].max(c[1]).max(c[2]).max(1e-6);
+            (top - c[0].min(c[1]).min(c[2])) / top
+        };
+        // 1.0 changes nothing, a grey never changes
+        assert_eq!(vibrance([120.0, 80.0, 40.0], 1.0), [120.0, 80.0, 40.0]);
+        for s in [0.5, 1.4, 2.0] {
+            let g = vibrance([90.0; 3], s);
+            assert!(g.iter().all(|v| near(*v, 90.0, 0.01)), "grey at {s}: {g:?}");
+        }
+        for c in [
+            [150.0, 80.0, 60.0],
+            [60.0, 120.0, 90.0],
+            [100.0, 90.0, 150.0],
+        ] {
+            let more = vibrance(c, 1.5);
+            let less = vibrance(c, 0.6);
+            assert!(
+                chroma(more) > chroma(c) && chroma(less) < chroma(c),
+                "{c:?}"
+            );
+            assert!(
+                near(luma(more), luma(c), 0.5) && near(luma(less), luma(c), 0.5),
+                "{c:?}"
+            );
+            assert!(more.iter().all(|v| (0.0..=255.0).contains(v)));
+        }
+        assert_eq!(vibrance([10.0, 20.0, 30.0], f32::NAN), [10.0, 20.0, 30.0]);
     }
 
     #[test]
